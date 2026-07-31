@@ -1,22 +1,53 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { SubtitleItem } from './types';
+import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from './srtFormatter';
+import { env } from './env';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+
 /**
- * Helper to get active API keys from environment variable (supports comma-separated list)
+ * Robust JSON repair parser for LLM responses cut off mid-stream or hitting max token limits
  */
-function getApiKeys(): string[] {
-  const raw = process.env.GEMINI_API_KEY || '';
-  const keys = raw
-    .split(',')
-    .map((k) => k.trim())
-    .filter((k) => k.length > 0);
-  if (keys.length === 0) {
-    throw new Error('GEMINI_API_KEY environment variable is missing or empty.');
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parsePartialOrTruncatedJSON(text: string): any {
+  if (!text) return null;
+  const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+  // 1. Standard JSON parse
+  try {
+    return JSON.parse(cleanText);
+  } catch {
+    // 2. Auto-repair truncated JSON array
+    try {
+      let repaired = cleanText;
+
+      // If cut off inside an unclosed string, close the quote
+      const quoteMatches = repaired.match(/"/g) || [];
+      if (quoteMatches.length % 2 !== 0) {
+        repaired += '"';
+      }
+
+      // Find the last valid complete JSON object closing brace '}'
+      const lastBraceIndex = repaired.lastIndexOf('}');
+      if (lastBraceIndex !== -1) {
+        repaired = repaired.substring(0, lastBraceIndex + 1) + ']';
+        return JSON.parse(repaired);
+      }
+    } catch (e2) {
+      console.warn('[JSON Repair] Could not recover truncated JSON automatically:', e2);
+    }
   }
-  return keys;
+  return null;
+}
+
+function getTempDirectory(): string {
+  const custom = env.tempDir || process.env.TEMP || process.env.TMP;
+  if (custom && fs.existsSync(custom)) {
+    return custom;
+  }
+  return os.tmpdir();
 }
 
 export async function processVideoSubtitlesFromStream(
@@ -25,22 +56,26 @@ export async function processVideoSubtitlesFromStream(
   fileName: string,
   targetLanguage: string = 'th'
 ): Promise<SubtitleItem[]> {
-  const apiKeys = getApiKeys();
+  const apiKeys = env.apiKeys;
+  if (apiKeys.length === 0) {
+    throw new Error('GEMINI_API_KEY environment variable is missing or empty.');
+  }
 
-  // Active models based on user quota dashboard
+  // Active models based on user quota dashboard and model priority rules
   const modelsToTry = [
+    'gemini-3.5-flash-lite', // Primary Default (High Quota: 500 RPD, 15 RPM)
+    'gemini-3.6-flash',      // High-Precision Model (20 RPD, 5 RPM)
+    'gemini-3-flash',        // (20 RPD, 5 RPM)
+    'gemini-3.5-flash',      // (20 RPD, 5 RPM)
+    'gemini-3.1-flash-lite', // (500 RPD, 15 RPM)
     'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-3.5-flash',
-    'gemini-3.6-flash',
-    'gemini-1.5-flash',
-    'gemini-2.0-flash'
+    'gemini-2.5-flash-lite'
   ];
 
   // 1. Sanitize file name to ASCII-only
   const ext = path.extname(fileName) || '.mp4';
   const safeFileName = `video_sub_${Date.now()}${ext}`;
-  const tempDir = os.tmpdir();
+  const tempDir = getTempDirectory();
   const tempFilePath = path.join(tempDir, safeFileName);
 
   // Stream file chunks directly to disk (RAM usage stays < 5MB regardless of file size)
@@ -53,7 +88,7 @@ export async function processVideoSubtitlesFromStream(
   }
   await new Promise((resolve) => writeStream.end(resolve));
 
-  let lastError: any = null;
+  let lastError: unknown = null;
 
   try {
     for (const apiKey of apiKeys) {
@@ -88,14 +123,32 @@ export async function processVideoSubtitlesFromStream(
             throw new Error('File processing failed on Gemini servers.');
           }
 
-          // 3. Prompt Gemini with structured schema
-          const prompt = `You are a Professional Subtitle Translator & Synchronizer.
-Your task is to transcribe the speech in the provided audio/video file and translate it into ${targetLanguage === 'th' ? 'Thai' : targetLanguage}.
-Requirements:
-1. Provide precise millisecond-level start and end timestamps in seconds (e.g., 1.50 for 1 second 500ms).
-2. Break long utterances into concise lines (maximum 10-12 words per line) for optimal reading speed.
-3. Ignore silent sections or background music without speech.
-4. Output strictly formatted according to the requested JSON schema.`;
+          // 3. Language configuration & prompt construction
+          const langMap: Record<string, { name: string; local: string }> = {
+            th: { name: 'Thai', local: 'ภาษาไทย' },
+            en: { name: 'English', local: 'English' },
+            ja: { name: 'Japanese', local: '日本語' },
+            zh: { name: 'Chinese', local: '中文' },
+            ko: { name: 'Korean', local: '한국어' },
+          };
+          const langConfig = langMap[targetLanguage] || { name: targetLanguage, local: targetLanguage };
+
+          const prompt = `You are a World-Class Professional Subtitle Translator & Synchronizer.
+Your task is to transcribe the spoken speech in the audio/video file into 'originalText' and TRANSLATE it into ${langConfig.name} (${langConfig.local}) for 'translatedText'.
+
+CRITICAL LANGUAGE REQUIREMENT (MUST FOLLOW):
+1. 'originalText': Transcribe the EXACT spoken audio in its original spoken language (e.g., Japanese/English/Chinese).
+2. 'translatedText': You MUST translate every single sentence into ${langConfig.name} (${langConfig.local}) language ONLY.
+   - If target language is Thai, 'translatedText' MUST BE IN THAI (${langConfig.local}).
+   - DO NOT output English, Japanese, or any other language in 'translatedText' when target language is ${langConfig.name}!
+
+CRITICAL REQUIREMENTS FOR TIMESTAMP ACCURACY & FULL DURATION COVERAGE:
+1. Cover the ENTIRE audio/video file duration from 00:00:00.000 to the end of the video (even if 20+ minutes long). Do NOT stop early or truncate timeline.
+2. Format startTime and endTime as standard time string in "HH:MM:SS.mmm" format (e.g. "00:01:23.500" for 1 min 23.5s, "00:15:04.200" for 15 min 4.2s, "00:20:04.000" for 20 min 4s).
+3. Do NOT output raw floating point numbers or MM.SS decimal formats for timestamps. Always use "HH:MM:SS.mmm".
+4. Break long utterances into concise lines (maximum 10-12 words per line) for optimal reading speed.
+5. Ignore long silent sections or background music without speech.
+6. Output strictly formatted according to the requested JSON schema.`;
 
           const response = await ai.models.generateContent({
             model: modelName,
@@ -109,6 +162,7 @@ Requirements:
               prompt,
             ],
             config: {
+              maxOutputTokens: 65536,
               responseMimeType: 'application/json',
               responseSchema: {
                 type: Type.ARRAY,
@@ -116,8 +170,8 @@ Requirements:
                   type: Type.OBJECT,
                   properties: {
                     id: { type: Type.STRING },
-                    startTime: { type: Type.NUMBER },
-                    endTime: { type: Type.NUMBER },
+                    startTime: { type: Type.STRING },
+                    endTime: { type: Type.STRING },
                     originalText: { type: Type.STRING },
                     translatedText: { type: Type.STRING },
                   },
@@ -132,7 +186,79 @@ Requirements:
             throw new Error('Gemini API returned an empty response.');
           }
 
-          const subtitles: SubtitleItem[] = JSON.parse(responseText);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const rawSubtitles: any[] = parsePartialOrTruncatedJSON(responseText);
+          if (!rawSubtitles || !Array.isArray(rawSubtitles)) {
+            throw new Error('Could not parse subtitles from Gemini API response.');
+          }
+
+          // Convert formatted timestamp strings (or numbers) into clean seconds and remove overlaps
+          const rawParsed: SubtitleItem[] = rawSubtitles
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            .map((item: any, idx: number) => {
+              const startSec = parseTimestampToSeconds(item.startTime);
+              const endSec = parseTimestampToSeconds(item.endTime);
+              const validEnd = endSec > startSec ? endSec : startSec + 2.0;
+
+              return {
+                id: item.id || String(idx + 1),
+                startTime: Math.max(0, Number(startSec.toFixed(3))),
+                endTime: Math.max(0, Number(validEnd.toFixed(3))),
+                originalText: String(item.originalText || '').trim(),
+                translatedText: String(item.translatedText || item.text || '').trim(),
+              };
+            })
+            .filter((item) => item.translatedText.length > 0);
+
+          let subtitles = sanitizeAndFixOverlaps(rawParsed);
+
+          // Post-processing fallback: If target is Thai but translatedText is missing Thai characters, translate directly
+          if (targetLanguage === 'th') {
+            const needsThaiTranslation = subtitles.some(
+              (item) => item.translatedText.length > 0 && !/[\u0E00-\u0E7F]/.test(item.translatedText)
+            );
+
+            if (needsThaiTranslation) {
+              console.log('[Language Guard] Detected non-Thai translatedText in response. Performing automatic Thai translation pass...');
+              try {
+                const transPrompt = `Translate the 'translatedText' of every item in this JSON array into natural, clear Thai (ภาษาไทย). Keep id, startTime, endTime, and originalText unchanged. Output valid JSON array.
+
+Input JSON:
+${JSON.stringify(subtitles, null, 2)}`;
+
+                const transResponse = await ai.models.generateContent({
+                  model: 'gemini-3.6-flash',
+                  contents: transPrompt,
+                  config: {
+                    responseMimeType: 'application/json',
+                    responseSchema: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          id: { type: Type.STRING },
+                          startTime: { type: Type.NUMBER },
+                          endTime: { type: Type.NUMBER },
+                          originalText: { type: Type.STRING },
+                          translatedText: { type: Type.STRING },
+                        },
+                        required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
+                      },
+                    },
+                  },
+                });
+
+                if (transResponse.text) {
+                  const fixed = JSON.parse(transResponse.text);
+                  if (Array.isArray(fixed) && fixed.length > 0) {
+                    subtitles = sanitizeAndFixOverlaps(fixed);
+                  }
+                }
+              } catch (transErr) {
+                console.warn('[Language Guard] Fallback translation warning:', transErr);
+              }
+            }
+          }
 
           // Clean up remote file asynchronously
           if (uploadedFile && uploadedFile.name) {
@@ -142,8 +268,9 @@ Requirements:
           }
 
           return subtitles;
-        } catch (err: any) {
-          console.warn(`Attempt failed with model ${modelName} using key ...${apiKey.slice(-6)}:`, err.message);
+        } catch (err: unknown) {
+          const error = err as { status?: number; message?: string };
+          console.warn(`Attempt failed with model ${modelName} using key ...${apiKey.slice(-6)}:`, error.message);
           lastError = err;
 
           if (uploadedFile && uploadedFile.name) {
@@ -151,18 +278,24 @@ Requirements:
           }
 
           const isRetryableError =
-            err.status === 429 ||
-            err.status === 404 ||
-            err.status === 503 ||
-            err.message?.includes('429') ||
-            err.message?.includes('404') ||
-            err.message?.includes('503') ||
-            err.message?.includes('Quota') ||
-            err.message?.includes('RESOURCE_EXHAUSTED') ||
-            err.message?.includes('UNAVAILABLE') ||
-            err.message?.includes('high demand') ||
-            err.message?.includes('not found') ||
-            err.message?.includes('no longer available');
+            error.status === 429 ||
+            error.status === 404 ||
+            error.status === 503 ||
+            error.message?.includes('429') ||
+            error.message?.includes('404') ||
+            error.message?.includes('503') ||
+            error.message?.includes('Quota') ||
+            error.message?.includes('RESOURCE_EXHAUSTED') ||
+            error.message?.includes('UNAVAILABLE') ||
+            error.message?.includes('high demand') ||
+            error.message?.includes('not found') ||
+            error.message?.includes('no longer available') ||
+            error.message?.includes('fetch failed') ||
+            error.message?.includes('timeout') ||
+            error.message?.includes('stream') ||
+            error.message?.includes('ETIMEDOUT') ||
+            error.message?.includes('ECONNRESET') ||
+            error.message?.includes('UND_ERR');
 
           if (!isRetryableError) {
             throw err;

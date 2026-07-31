@@ -1,40 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processVideoSubtitlesFromStream } from '@/lib/geminiVideoService';
+import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
 
-export const maxDuration = 300; // Allow up to 5 minutes for video processing
+export const maxDuration = 300; // 5 minutes per chunk request
 
 export async function POST(req: NextRequest) {
+  triggerBackgroundTempCleanup();
   try {
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     const targetLanguage = (formData.get('targetLanguage') as string) || 'th';
+    const chunkIndex = parseInt((formData.get('chunkIndex') as string) || '0', 10);
+    const chunkStartTime = parseFloat((formData.get('chunkStartTime') as string) || '0');
 
     if (!file) {
       return NextResponse.json(
-        { success: false, error: 'No video/audio file provided.' },
+        { success: false, error: 'No audio chunk file provided.' },
         { status: 400 }
       );
     }
 
-    // Stream file contents directly to disk to consume near-zero Node memory
     const subtitles = await processVideoSubtitlesFromStream(
       file.stream() as unknown as ReadableStream<Uint8Array>,
-      file.type || 'video/mp4',
-      file.name,
+      file.type || 'audio/wav',
+      file.name || `chunk_${chunkIndex}.wav`,
       targetLanguage
     );
 
     return NextResponse.json({
       success: true,
+      chunkIndex,
+      chunkStartTime,
       subtitles,
     });
   } catch (error: unknown) {
-    console.error('Error processing video subtitles:', error);
+    console.error('Error processing audio chunk:', error);
     const errMessage = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
       {
         success: false,
-        error: errMessage || 'An unexpected error occurred during processing.',
+        error: errMessage || 'Error processing audio chunk.',
       },
       { status: 500 }
     );

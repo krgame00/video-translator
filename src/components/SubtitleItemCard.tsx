@@ -29,7 +29,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = ({
     >
       <div className="flex items-center justify-between gap-2 mb-3">
         {/* Time Inputs & Jump Button */}
-        <div className="flex items-center gap-2 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <button
             onClick={() => onJumpTo(item.startTime)}
             className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-blue-600/20 text-blue-400 hover:bg-blue-600 hover:text-white transition-colors"
@@ -40,7 +40,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = ({
           </button>
 
           <div className="flex items-center gap-1 bg-zinc-950/80 px-2 py-1 rounded-md border border-zinc-800 text-zinc-300">
-            <Clock className="w-3 h-3 text-zinc-500" />
+            <Clock className="w-3 h-3 text-zinc-500 shrink-0" />
             <input
               type="number"
               step="0.1"
@@ -49,7 +49,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = ({
               onChange={(e) =>
                 onUpdate({ ...item, startTime: parseFloat(e.target.value) || 0 })
               }
-              className="w-14 bg-transparent text-center focus:outline-none focus:text-blue-400"
+              className="w-12 sm:w-14 bg-transparent text-center focus:outline-none focus:text-blue-400"
             />
             <span className="text-zinc-600">→</span>
             <input
@@ -60,16 +60,16 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = ({
               onChange={(e) =>
                 onUpdate({ ...item, endTime: parseFloat(e.target.value) || 0 })
               }
-              className="w-14 bg-transparent text-center focus:outline-none focus:text-blue-400"
+              className="w-12 sm:w-14 bg-transparent text-center focus:outline-none focus:text-blue-400"
             />
             <span className="text-zinc-500 text-[10px]">s</span>
           </div>
         </div>
 
-        {/* Delete Button */}
+        {/* Delete Button (Always visible on touch, hover on desktop) */}
         <button
           onClick={() => onDelete(item.id)}
-          className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-all"
+          className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 p-1.5 rounded-lg text-zinc-400 sm:text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-all shrink-0"
           title="Delete subtitle"
         >
           <Trash2 className="w-4 h-4" />

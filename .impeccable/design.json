@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-01T00:00:00.000Z",
+  "title": "Design System: Video Subtitle Studio",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Sapphire Blue", "canonical": "#2563eb", "tonalRamp": ["#1e3a8a", "#1e40af", "#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#93c5fd", "#bfdbfe"] },
+      "neutral-bg": { "role": "neutral", "displayName": "Deep Slate Base", "canonical": "#09090b", "tonalRamp": ["#09090b", "#18181b", "#27272a", "#3f3f46", "#52525b", "#71717a", "#a1a1aa", "#d4d4d8"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display Title", "purpose": "Header titles and branding." },
+      "body": { "displayName": "Body Text", "purpose": "Subtitle editor lines and primary text." }
+    },
+    "shadows": [
+      { "name": "glow-accent", "value": "0 10px 25px -5px rgba(37, 99, 235, 0.2)", "purpose": "Elevated glow for primary CTA and active progress banner." }
+    ],
+    "motion": [
+      { "name": "ease-hover", "value": "transform 0.2s cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Smooth scaling on primary buttons." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary CTA Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action button for generating and exporting subtitles.",
+      "html": "<button class=\"ds-btn-primary\"><span>Generate Subtitles with Gemini</span></button>",
+      "css": ".ds-btn-primary { background: linear-gradient(to right, #2563eb, #9333ea, #4f46e5); color: #ffffff; padding: 10px 24px; font-weight: 500; font-size: 0.75rem; border-radius: 0.75rem; border: none; cursor: pointer; transition: transform 0.2s; shadow: 0 10px 25px -5px rgba(147, 51, 234, 0.2); } .ds-btn-primary:hover { transform: scale(1.02); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The High-Contrast Subtitle Control Room",
+    "overview": "Video Subtitle Studio is a focused, high-precision media translation environment. It combines dark-mode utilitarian surface contrast with responsive audio waveform and subtitle synchronization.",
+    "keyCharacteristics": [
+      "Sleek Dark Mode Canvas with deep zinc-950 base background",
+      "High Legibility using high-contrast text and Itim/Geist typography",
+      "Vibrant Functional Accents in sapphire blue and purple"
+    ],
+    "rules": [
+      { "name": "The Single-Accent Action Rule", "body": "Saturated blue-purple gradients are reserved strictly for executable user actions and active AI progress indicators.", "section": "colors" },
+      { "name": "The Flat-Surface Rule", "body": "Surfaces are flat at rest; elevation glow appears exclusively during active processing or hover states.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do maintain high-contrast text (#ededed) against dark surfaces (#09090b / #18181b).",
+      "Do use font-itim for Thai subtitle rendering to ensure maximum readability.",
+      "Do provide immediate feedback and smooth progress indicators during AI processing."
+    ],
+    "donts": [
+      "Don't use low-contrast gray text on dark surfaces that fails 4.5:1 contrast checks.",
+      "Don't use colored side-stripe borders or multi-colored decorative text gradients.",
+      "Don't hide processing progress or time estimates behind generic non-descriptive loaders."
+    ]
+  }
+}
