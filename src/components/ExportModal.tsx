@@ -3,7 +3,12 @@
 import React, { useState } from 'react';
 import { SubtitleItem } from '@/lib/types';
 import { generateSRT, generateVTT, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
+import { uploadFileInChunks } from '@/lib/chunkedUploader';
 import { Download, FileText, X, Loader2, Clock, Zap } from 'lucide-react';
+
+// Files above this size use chunked upload instead of a single-stream fetch
+// (avoids proxy payload limits / client memory pressure on very large videos).
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024;
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -26,7 +31,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   // Dynamic Styling States
   const [fontSize, setFontSize] = useState(22);
   const [primaryColor, setPrimaryColor] = useState('FFFFFF');
-  const [borderStyle, setBorderStyle] = useState(4); // 4 = Box background
+  const [borderStyle, setBorderStyle] = useState(1); // 1 = Outline Only
 
   if (!isOpen) return null;
 
@@ -96,17 +101,41 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         fileToSend = await resVid.blob();
       }
 
-      // 2. Stream raw binary video payload directly to server
-      const uploadRes = await fetch(`/api/export-hardsub?action=upload&jobId=${jobId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: fileToSend,
-      });
+      if (fileToSend.size > LARGE_FILE_THRESHOLD) {
+        // 2b. Large file: chunked upload (file.slice) + attach to job
+        setFfmpegStatus('กำลังส่งไฟล์วิดีโอขนาดใหญ่ (Chunked Upload)...');
 
-      if (!uploadRes.ok) {
-        let errData;
-        try { errData = await uploadRes.json(); } catch {}
-        throw new Error(errData?.error || `Upload failed with HTTP ${uploadRes.status}`);
+        const { uploadId } = await uploadFileInChunks({
+          file: fileToSend,
+          fileName: selectedFile?.name || 'video.mp4',
+          onProgress: (uploaded, total) => {
+            const pct = Math.min(100, Math.round((uploaded / total) * 100));
+            setFfmpegStatus(`กำลังอัปโหลดวิดีโอแบบแบ่งส่วน... ${pct}% (${(uploaded / 1048576).toFixed(0)}MB / ${(total / 1048576).toFixed(0)}MB)`);
+          },
+        });
+
+        const attachRes = await fetch(
+          `/api/export-hardsub?action=attach&jobId=${jobId}&uploadId=${uploadId}`,
+          { method: 'POST' }
+        );
+        if (!attachRes.ok) {
+          let errData;
+          try { errData = await attachRes.json(); } catch {}
+          throw new Error(errData?.error || `Attach failed with HTTP ${attachRes.status}`);
+        }
+      } else {
+        // 2. Stream raw binary video payload directly to server
+        const uploadRes = await fetch(`/api/export-hardsub?action=upload&jobId=${jobId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: fileToSend,
+        });
+
+        if (!uploadRes.ok) {
+          let errData;
+          try { errData = await uploadRes.json(); } catch {}
+          throw new Error(errData?.error || `Upload failed with HTTP ${uploadRes.status}`);
+        }
       }
 
       setFfmpegStatus('กำลังประมวลผลด้วย FFmpeg GPU Hardware Acceleration (NVENC)...');

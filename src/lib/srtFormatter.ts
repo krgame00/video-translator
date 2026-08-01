@@ -22,7 +22,50 @@ export function formatTimeVTT(seconds: number): string {
 }
 
 /**
+ * Thai (and other script) word segmentation via Intl.Segmenter (ICU dictionary).
+ * Returns word tokens. Falls back to character splitting when unsupported.
+ */
+function segmentWords(text: string): string[] {
+  try {
+    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+      const segmenter = new Intl.Segmenter('th', { granularity: 'word' });
+      return Array.from(segmenter.segment(text))
+        .map((s) => s.segment)
+        .filter((w) => w.trim().length > 0);
+    }
+  } catch {}
+  // Fallback: split on whitespace, else per-character for space-less scripts
+  const spaced = text.split(/\s+/).filter((w) => w.length > 0);
+  return spaced.length > 1 ? spaced : Array.from(text);
+}
+
+/**
+ * Wraps text into visual lines at word boundaries (no mid-word cuts).
+ * A single token longer than maxChars is hard-split (rare: URLs/numbers).
+ */
+function wrapByWords(text: string, maxChars: number): string[] {
+  const words = segmentWords(text);
+  const lines: string[] = [];
+  let cur = '';
+  for (const w of words) {
+    if ((cur + w).length > maxChars && cur) {
+      lines.push(cur);
+      cur = w;
+    } else {
+      cur += w;
+    }
+    while (cur.length > maxChars) {
+      lines.push(cur.slice(0, maxChars));
+      cur = cur.slice(maxChars);
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines.filter((l) => l.length > 0);
+}
+
+/**
  * Splits a single long subtitle item into multiple short subtitle items if text is long or duration > 6 seconds.
+ * Uses Thai-aware word segmentation so lines never cut mid-word, and caps each cue at ~6.5s.
  */
 export function splitLongSubtitleItem(item: SubtitleItem): SubtitleItem[] {
   if (!item || !item.translatedText) return [item];
@@ -30,61 +73,77 @@ export function splitLongSubtitleItem(item: SubtitleItem): SubtitleItem[] {
   const text = item.translatedText.trim();
   const duration = item.endTime - item.startTime;
 
+  const MAX_CUE_CHARS = 40; // ~2 visual lines of Thai text
+  const MAX_CUE_DURATION = 6.5; // seconds per cue (readability standard: 2-7s)
+
   // If text is short (< 50 chars), has no newlines, and duration <= 6.0s, keep as-is
   if (text.length <= 50 && !text.includes('\n') && duration <= 6.0) {
     return [item];
   }
 
-  // 1. Split text by newlines or punctuation (?, !, 。, ？, ！, or multi-space)
-  let rawChunks = text
+  // 1. Split text by newlines or punctuation (?, !, 。, ？, ！)
+  const sentenceChunks = text
     .split(/[\r\n!?。？！]+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
-  if (rawChunks.length <= 1 && text.length > 50) {
-    // If no punctuation found, split by space or ~45 character chunks
-    const words = text.split(/\s+/);
-    if (words.length > 6) {
-      rawChunks = [];
-      let temp = '';
-      for (const w of words) {
-        if ((temp + ' ' + w).length > 45) {
-          if (temp) rawChunks.push(temp.trim());
-          temp = w;
-        } else {
-          temp += (temp ? ' ' : '') + w;
-        }
-      }
-      if (temp) rawChunks.push(temp.trim());
+  // 2. Wrap each sentence into ≤ MAX_CUE_CHARS lines at word boundaries
+  let rawChunks: string[] = [];
+  for (const sentence of sentenceChunks) {
+    rawChunks.push(...wrapByWords(sentence, MAX_CUE_CHARS));
+  }
+
+  // 3. Further split any cue whose allocated time would exceed the readability cap
+  const totalChars = rawChunks.reduce((sum, c) => sum + c.length, 0) || 1;
+  const splitAtDuration: string[] = [];
+  for (const chunk of rawChunks) {
+    const alloc = (chunk.length / totalChars) * duration;
+    if (alloc > MAX_CUE_DURATION && chunk.length > 12) {
+      splitAtDuration.push(...wrapByWords(chunk, Math.max(12, Math.floor(chunk.length / Math.ceil(alloc / MAX_CUE_DURATION)))));
     } else {
-      // Chunky long string without spaces (e.g. continuous Thai text)
-      rawChunks = [];
-      for (let i = 0; i < text.length; i += 45) {
-        rawChunks.push(text.slice(i, i + 45).trim());
-      }
+      splitAtDuration.push(chunk);
     }
   }
+  rawChunks = splitAtDuration;
+
+  // 4. Merge orphan-short cues into the previous cue to avoid fragments.
+  // Threshold 5 (UTF-16 units): Thai words like "เป็น" span 4 units (เ ป ็ น).
+  const merged: string[] = [];
+  for (const chunk of rawChunks) {
+    if (merged.length > 0 && chunk.length < 5 && (merged[merged.length - 1] + chunk).length <= 40) {
+      merged[merged.length - 1] += chunk;
+    } else {
+      merged.push(chunk);
+    }
+  }
+  rawChunks = merged;
 
   if (rawChunks.length <= 1) {
     return [item];
   }
 
-  // 2. Distribute time evenly across sub-chunks
+  // 5. Distribute time proportionally to character count (longer text = more time)
   const totalDuration = Math.max(2.0, item.endTime - item.startTime);
-  const chunkDur = totalDuration / rawChunks.length;
+  const finalTotalChars = rawChunks.reduce((sum, c) => sum + c.length, 0) || 1;
 
-  return rawChunks.map((chunk, idx) => {
-    const subStart = item.startTime + idx * chunkDur;
-    const subEnd = Math.min(item.endTime, subStart + chunkDur - 0.05);
+  const result: SubtitleItem[] = [];
+  let cursor = item.startTime;
+  rawChunks.forEach((chunk, idx) => {
+    const chunkDur = Math.max(0.5, totalDuration * (chunk.length / finalTotalChars));
+    const subStart = cursor;
+    const subEnd = Math.min(item.endTime, cursor + chunkDur);
 
-    return {
+    result.push({
       id: `${item.id || 'sub'}_${idx + 1}`,
       startTime: Number(subStart.toFixed(3)),
       endTime: Number(Math.max(subStart + 0.5, subEnd).toFixed(3)),
       originalText: item.originalText || '',
       translatedText: chunk,
-    };
+    });
+    cursor = subEnd;
   });
+
+  return result;
 }
 
 /**

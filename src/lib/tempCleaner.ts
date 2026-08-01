@@ -9,6 +9,7 @@ import { env } from './env';
  *
  * Target file prefixes:
  * - `hs_` (Hardsub export jobs, temporary SRT files, input/output MP4s)
+ * - `ul_` (Chunked upload sessions + raw temp files from /api/upload)
  * - `video_sub_` (Temporary uploaded video files for Gemini API)
  * - `chunk_` (Audio chunk files)
  *
@@ -42,6 +43,7 @@ export function cleanExpiredTempFiles(
     for (const file of files) {
       if (
         file.startsWith('hs_') ||
+        file.startsWith('ul_') ||
         file.startsWith('video_sub_') ||
         file.startsWith('chunk_')
       ) {

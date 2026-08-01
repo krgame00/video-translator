@@ -26,7 +26,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg' | 'xl'>('lg');
   const [textColor, setTextColor] = useState<string>('#FFFFFF');
   const [position, setPosition] = useState<'bottom' | 'top'>('bottom');
-  const [bgStyle] = useState<'glass' | 'dark' | 'none'>('glass');
+  const [bgStyle] = useState<'glass' | 'dark' | 'none'>('none');
 
   // Synchronize seek requests from parent/SubtitleEditor
   useEffect(() => {

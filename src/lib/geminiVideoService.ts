@@ -101,9 +101,14 @@ CRITICAL REQUIREMENTS FOR TIMESTAMP ACCURACY & FULL DURATION COVERAGE:
 1. Cover the ENTIRE audio/video file duration from 00:00:00.000 to the end of the video (even if 20+ minutes long). Do NOT stop early or truncate timeline.
 2. Format startTime and endTime as standard time string in "HH:MM:SS.mmm" format (e.g. "00:01:23.500" for 1 min 23.5s, "00:15:04.200" for 15 min 4.2s, "00:20:04.000" for 20 min 4s).
 3. Do NOT output raw floating point numbers or MM.SS decimal formats for timestamps. Always use "HH:MM:SS.mmm".
-4. Break long utterances into concise lines (maximum 10-12 words per line) for optimal reading speed.
-5. Ignore long silent sections or background music without speech.
-6. Output strictly formatted according to the requested JSON schema.`;
+
+CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
+4. Each cue MUST be 2-7 seconds long. NEVER merge multiple sentences into one long cue, and NEVER output 10-20 second cues.
+5. Break speech at sentence or clause boundaries (pauses / intonation). One complete idea per cue.
+6. Keep each cue to at most 2 visual lines: ~40 characters for Thai, ~10-12 words for languages with spaces.
+7. NEVER split a word across lines or cues. For Thai (no spaces between words), always end a cue at a phrase boundary — never mid-word.
+8. Ignore long silent sections or background music without speech.
+9. Output strictly formatted according to the requested JSON schema.`;
 
           const response = await ai.models.generateContent({
             model: modelName,

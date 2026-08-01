@@ -2,7 +2,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { SubtitleStyle } from './types';
 
-const JOB_ID_RE = /^hs_[a-zA-Z0-9]{1,40}$/;
+const JOB_ID_RE = /^hs_[a-zA-Z0-9_]{1,40}$/;
+const UPLOAD_ID_RE = /^ul_[a-zA-Z0-9_]{1,40}$/;
 
 /**
  * Export job IDs are server-generated as `hs_<timestamp>_<random>`.
@@ -10,6 +11,13 @@ const JOB_ID_RE = /^hs_[a-zA-Z0-9]{1,40}$/;
  */
 export function isSafeJobId(id: string | null | undefined): id is string {
   return typeof id === 'string' && JOB_ID_RE.test(id);
+}
+
+/**
+ * Upload IDs are server-generated as `ul_<timestamp>_<random>`.
+ */
+export function isSafeUploadId(id: string | null | undefined): id is string {
+  return typeof id === 'string' && UPLOAD_ID_RE.test(id);
 }
 
 /**
@@ -35,7 +43,7 @@ const DEFAULT_STYLE: SubtitleStyle = {
   primaryColor: 'FFFFFF',
   outlineColor: '000000',
   backColor: '000000',
-  borderStyle: 4,
+  borderStyle: 1,
   marginV: 30,
 };
 

@@ -17,6 +17,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { isSafeUploadId } from '@/lib/security';
 
 const execFilePromise = promisify(execFile);
 
@@ -89,8 +90,11 @@ async function runFFmpegEncoding(jobId: string) {
     const backColor = style.backColor || '000000';    // Dark background box
     const borderStyle = style.borderStyle || 4; // default to back box border
     const marginV = style.marginV || 30;
+    
+    // Transparent background if borderStyle is 1 (Outline only)
+    const effectiveBackColor = borderStyle === 1 ? '000000&HFF' : `&H80${backColor}`;
 
-    const forceStyle = `Fontname=${fontName},Fontsize=${fontSize},PrimaryColour=&H00${primaryColor},OutlineColour=&H00${outlineColor},BackColour=&H80${backColor},BorderStyle=${borderStyle},Outline=2,Shadow=0,MarginV=${marginV}`;
+    const forceStyle = `Fontname=${fontName},Fontsize=${fontSize},PrimaryColour=&H00${primaryColor},OutlineColour=&H00${outlineColor},BackColour=${effectiveBackColor},BorderStyle=${borderStyle},Outline=2,Shadow=0,MarginV=${marginV}`;
 
     // Using ultra-fast preset for top speed + h.264 optimization.
     // execFile with an args array (no shell) so no value can inject commands.
@@ -250,6 +254,74 @@ export async function POST(req: NextRequest) {
       }
 
       // Launch non-blocking async background encoding
+      runFFmpegEncoding(jobId);
+
+      return NextResponse.json({ success: true, status: 'encoding' });
+    } catch (err: unknown) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const status = err instanceof HttpError ? err.status : 500;
+      return NextResponse.json(
+        { success: false, error: errMessage },
+        { status }
+      );
+    }
+  }
+
+  // Mode 2b: Attach a chunked upload (from /api/upload) to this job
+  if (action === 'attach') {
+    if (!jobId || !isSafeJobId(jobId)) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid jobId parameter.' },
+        { status: 400 }
+      );
+    }
+
+    const uploadId = searchParams.get('uploadId');
+    if (!isSafeUploadId(uploadId)) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid uploadId parameter.' },
+        { status: 400 }
+      );
+    }
+
+    try {
+      const job = loadJob(jobId);
+      if (!job) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid or expired export jobId.' },
+          { status: 404 }
+        );
+      }
+
+      // Load chunked upload session to get the verified temp file
+      const sessionPath = resolveTempPath(`${uploadId}_session.json`);
+      let session: { uploadedSize: number; totalSize: number; tempPath: string } | null = null;
+      try {
+        if (fs.existsSync(sessionPath)) {
+          session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+        }
+      } catch {}
+      if (!session) {
+        return NextResponse.json(
+          { success: false, error: 'Chunked upload session not found or expired.' },
+          { status: 404 }
+        );
+      }
+
+      // Chunked upload temp file follows the `${uploadId}_raw.tmp` convention
+      const rawPath = resolveTempPath(`${uploadId}_raw.tmp`);
+      if (session.uploadedSize < session.totalSize || !fs.existsSync(rawPath)) {
+        return NextResponse.json(
+          { success: false, error: 'Chunked upload is incomplete.' },
+          { status: 400 }
+        );
+      }
+
+      // Move verified temp file into the job's input path, then clean up session
+      fs.copyFileSync(rawPath, job.inPath);
+      try { fs.unlinkSync(rawPath); } catch {}
+      try { fs.unlinkSync(sessionPath); } catch {}
+
       runFFmpegEncoding(jobId);
 
       return NextResponse.json({ success: true, status: 'encoding' });
