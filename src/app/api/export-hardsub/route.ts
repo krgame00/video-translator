@@ -3,18 +3,33 @@ import { SubtitleItem, ExportJob } from '@/lib/types';
 import { generateSRT } from '@/lib/srtFormatter';
 import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
 import { env } from '@/lib/env';
+import {
+  isSafeJobId,
+  resolveTempPath,
+  sanitizeStyle,
+  MAX_UPLOAD_BYTES,
+  HttpError,
+  createRateLimiter,
+  getClientIp,
+} from '@/lib/security';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-const execPromise = promisify(exec);
+const execFilePromise = promisify(execFile);
+
+// Job creation is expensive (spawns FFmpeg + temp files). Limit casual abuse.
+const prepareLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
 
 export const maxDuration = 300; // 5 minutes max execution per step
 
 function getJobFilePath(jobId: string): string {
-  return path.join(os.tmpdir(), `${jobId}_job.json`);
+  if (!isSafeJobId(jobId)) {
+    throw new Error('Invalid jobId.');
+  }
+  return resolveTempPath(`${jobId}_job.json`);
 }
 
 function saveJob(job: ExportJob): void {
@@ -26,16 +41,17 @@ function saveJob(job: ExportJob): void {
 }
 
 function loadJob(jobId: string): ExportJob | null {
-  const p = getJobFilePath(jobId);
-  if (!fs.existsSync(p)) return null;
   try {
+    const p = getJobFilePath(jobId);
+    if (!fs.existsSync(p)) return null;
     return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
 function deleteJob(jobId: string): void {
+  if (!isSafeJobId(jobId)) return;
   const job = loadJob(jobId);
   const tempFiles = job
     ? [job.inPath, job.srtPath, job.outPath, getJobFilePath(jobId)]
@@ -43,7 +59,7 @@ function deleteJob(jobId: string): void {
 
   tempFiles.forEach((p) => {
     if (fs.existsSync(p)) {
-      try { fs.unlinkSync(p); } catch (e) {}
+      try { fs.unlinkSync(p); } catch {}
     }
   });
 }
@@ -63,9 +79,8 @@ async function runFFmpegEncoding(jobId: string) {
     const outFileName = `${jobId}_out.mp4`;
 
     const ffmpegBin = env.ffmpegPath || 'ffmpeg';
-    const hwaccel = env.ffmpegHwaccel ? `-hwaccel ${env.ffmpegHwaccel}` : '';
-    
-    // Construct force_style string based on dynamic inputs
+
+    // Construct force_style string based on dynamic inputs (already whitelist-sanitized)
     const style = job.style || {};
     const fontName = style.fontName || 'Itim';
     const fontSize = style.fontSize || 22;
@@ -77,14 +92,30 @@ async function runFFmpegEncoding(jobId: string) {
 
     const forceStyle = `Fontname=${fontName},Fontsize=${fontSize},PrimaryColour=&H00${primaryColor},OutlineColour=&H00${outlineColor},BackColour=&H80${backColor},BorderStyle=${borderStyle},Outline=2,Shadow=0,MarginV=${marginV}`;
 
-    // Using ultra-fast preset for top speed + h.264 optimization
-    const ffmpegCmd = `${ffmpegBin} ${hwaccel} -y -i "${inFileName}" -vf "subtitles='${srtFileName}':force_style='${forceStyle}'" -c:v libx264 -preset ultrafast -profile:v main -level 4.1 -pix_fmt yuv420p -movflags +faststart -threads 0 -c:a copy "${outFileName}"`;
+    // Using ultra-fast preset for top speed + h.264 optimization.
+    // execFile with an args array (no shell) so no value can inject commands.
+    const ffmpegArgs: string[] = [];
+    if (env.ffmpegHwaccel) ffmpegArgs.push('-hwaccel', env.ffmpegHwaccel);
+    ffmpegArgs.push(
+      '-y',
+      '-i', inFileName,
+      '-vf', `subtitles='${srtFileName}':force_style='${forceStyle}'`,
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-profile:v', 'main',
+      '-level', '4.1',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      '-threads', '0',
+      '-c:a', 'copy',
+      outFileName
+    );
 
-    console.log(`[FFmpeg Hardsub ${jobId}] Executing in ${tempDir}: ${ffmpegCmd}`);
+    console.log(`[FFmpeg Hardsub ${jobId}] Executing in ${tempDir}: ${ffmpegBin} ${ffmpegArgs.join(' ')}`);
     job.progress = 40;
     saveJob(job);
 
-    await execPromise(ffmpegCmd, { cwd: tempDir, maxBuffer: 50 * 1024 * 1024 });
+    await execFilePromise(ffmpegBin, ffmpegArgs, { cwd: tempDir, maxBuffer: 50 * 1024 * 1024 });
 
     if (!fs.existsSync(job.outPath) || fs.statSync(job.outPath).size === 0) {
       throw new Error('FFmpeg output video file was not generated.');
@@ -103,7 +134,7 @@ async function runFFmpegEncoding(jobId: string) {
         job.error = errMessage || 'FFmpeg encoding failed.';
         saveJob(job);
       }
-    } catch (e) {}
+    } catch {}
   }
 }
 
@@ -116,9 +147,11 @@ export async function POST(req: NextRequest) {
   // Mode 1: Prepare session
   if (action === 'prepare') {
     try {
+      prepareLimiter(getClientIp(req));
+
       const body = await req.json();
       const subtitles: SubtitleItem[] = body.subtitles || [];
-      const style: any = body.style || {};
+      const style = sanitizeStyle(body.style);
 
       if (!subtitles || subtitles.length === 0) {
         return NextResponse.json(
@@ -152,9 +185,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, jobId: id });
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : String(err);
+      const status = err instanceof HttpError ? err.status : 500;
       return NextResponse.json(
         { success: false, error: errMessage },
-        { status: 500 }
+        { status }
       );
     }
   }
@@ -169,35 +203,64 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const job = loadJob(jobId);
-    if (!job) {
+    if (!isSafeJobId(jobId)) {
       return NextResponse.json(
-        { success: false, error: 'Invalid or expired export jobId.' },
-        { status: 404 }
-      );
-    }
-
-    if (!req.body) {
-      return NextResponse.json(
-        { success: false, error: 'No video stream payload provided.' },
+        { success: false, error: 'Invalid jobId.' },
         { status: 400 }
       );
     }
 
-    // Stream raw incoming video bytes directly to temp file
-    const writeStream = fs.createWriteStream(job.inPath);
-    const reader = req.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) writeStream.write(value);
+    try {
+      const job = loadJob(jobId);
+      if (!job) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid or expired export jobId.' },
+          { status: 404 }
+        );
+      }
+
+      if (!req.body) {
+        return NextResponse.json(
+          { success: false, error: 'No video stream payload provided.' },
+          { status: 400 }
+        );
+      }
+
+      // Stream raw incoming video bytes directly to temp file (with size cap)
+      const writeStream = fs.createWriteStream(job.inPath);
+      const reader = req.body.getReader();
+      let received = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            received += value.length;
+            if (received > MAX_UPLOAD_BYTES) {
+              throw new HttpError(413, 'Upload exceeds the maximum allowed size.');
+            }
+            writeStream.write(value);
+          }
+        }
+        await new Promise((resolve) => writeStream.end(resolve));
+      } catch (uploadErr) {
+        writeStream.destroy();
+        deleteJob(jobId);
+        throw uploadErr;
+      }
+
+      // Launch non-blocking async background encoding
+      runFFmpegEncoding(jobId);
+
+      return NextResponse.json({ success: true, status: 'encoding' });
+    } catch (err: unknown) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const status = err instanceof HttpError ? err.status : 500;
+      return NextResponse.json(
+        { success: false, error: errMessage },
+        { status }
+      );
     }
-    await new Promise((resolve) => writeStream.end(resolve));
-
-    // Launch non-blocking async background encoding
-    runFFmpegEncoding(jobId);
-
-    return NextResponse.json({ success: true, status: 'encoding' });
   }
 
   return NextResponse.json({ success: false, error: 'Invalid action.' }, { status: 400 });
@@ -211,6 +274,13 @@ export async function GET(req: NextRequest) {
   if (!jobId) {
     return NextResponse.json(
       { success: false, error: 'Missing jobId parameter.' },
+      { status: 400 }
+    );
+  }
+
+  if (!isSafeJobId(jobId)) {
+    return NextResponse.json(
+      { success: false, error: 'Invalid jobId.' },
       { status: 400 }
     );
   }

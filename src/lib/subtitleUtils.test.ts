@@ -28,4 +28,4 @@ function testSubtitleUtils() {
   console.log('✅ subtitleUtils unit tests passed successfully!');
 }
 
-testSubtitleUtils();
+test('subtitleUtils', testSubtitleUtils);

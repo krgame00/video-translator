@@ -1,46 +1,11 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
+import { MODELS, parsePartialOrTruncatedJSON, requestJSON, Type } from './geminiClient';
 import { SubtitleItem } from './types';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from './srtFormatter';
 import { env } from './env';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-
-
-/**
- * Robust JSON repair parser for LLM responses cut off mid-stream or hitting max token limits
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parsePartialOrTruncatedJSON(text: string): any {
-  if (!text) return null;
-  const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-
-  // 1. Standard JSON parse
-  try {
-    return JSON.parse(cleanText);
-  } catch {
-    // 2. Auto-repair truncated JSON array
-    try {
-      let repaired = cleanText;
-
-      // If cut off inside an unclosed string, close the quote
-      const quoteMatches = repaired.match(/"/g) || [];
-      if (quoteMatches.length % 2 !== 0) {
-        repaired += '"';
-      }
-
-      // Find the last valid complete JSON object closing brace '}'
-      const lastBraceIndex = repaired.lastIndexOf('}');
-      if (lastBraceIndex !== -1) {
-        repaired = repaired.substring(0, lastBraceIndex + 1) + ']';
-        return JSON.parse(repaired);
-      }
-    } catch (e2) {
-      console.warn('[JSON Repair] Could not recover truncated JSON automatically:', e2);
-    }
-  }
-  return null;
-}
 
 function getTempDirectory(): string {
   const custom = env.tempDir || process.env.TEMP || process.env.TMP;
@@ -54,23 +19,13 @@ export async function processVideoSubtitlesFromStream(
   stream: ReadableStream<Uint8Array>,
   mimeType: string,
   fileName: string,
-  targetLanguage: string = 'th'
+  targetLanguage: string = 'th',
+  signal?: AbortSignal
 ): Promise<SubtitleItem[]> {
   const apiKeys = env.apiKeys;
   if (apiKeys.length === 0) {
     throw new Error('GEMINI_API_KEY environment variable is missing or empty.');
   }
-
-  // Active models based on user quota dashboard and model priority rules
-  const modelsToTry = [
-    'gemini-3.5-flash-lite', // Primary Default (High Quota: 500 RPD, 15 RPM)
-    'gemini-3.6-flash',      // High-Precision Model (20 RPD, 5 RPM)
-    'gemini-3-flash',        // (20 RPD, 5 RPM)
-    'gemini-3.5-flash',      // (20 RPD, 5 RPM)
-    'gemini-3.1-flash-lite', // (500 RPD, 15 RPM)
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite'
-  ];
 
   // 1. Sanitize file name to ASCII-only
   const ext = path.extname(fileName) || '.mp4';
@@ -94,7 +49,7 @@ export async function processVideoSubtitlesFromStream(
     for (const apiKey of apiKeys) {
       const ai = new GoogleGenAI({ apiKey });
 
-      for (const modelName of modelsToTry) {
+      for (const modelName of MODELS) {
         let uploadedFile;
         try {
           // 2. Upload file using Gemini File API
@@ -164,6 +119,7 @@ CRITICAL REQUIREMENTS FOR TIMESTAMP ACCURACY & FULL DURATION COVERAGE:
             config: {
               maxOutputTokens: 65536,
               responseMimeType: 'application/json',
+              abortSignal: signal,
               responseSchema: {
                 type: Type.ARRAY,
                 items: {
@@ -226,33 +182,27 @@ CRITICAL REQUIREMENTS FOR TIMESTAMP ACCURACY & FULL DURATION COVERAGE:
 Input JSON:
 ${JSON.stringify(subtitles, null, 2)}`;
 
-                const transResponse = await ai.models.generateContent({
-                  model: 'gemini-3.6-flash',
-                  contents: transPrompt,
-                  config: {
-                    responseMimeType: 'application/json',
-                    responseSchema: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          id: { type: Type.STRING },
-                          startTime: { type: Type.NUMBER },
-                          endTime: { type: Type.NUMBER },
-                          originalText: { type: Type.STRING },
-                          translatedText: { type: Type.STRING },
-                        },
-                        required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
+                const fixed = await requestJSON<SubtitleItem[]>({
+                  prompt: transPrompt,
+                  schema: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        id: { type: Type.STRING },
+                        startTime: { type: Type.NUMBER },
+                        endTime: { type: Type.NUMBER },
+                        originalText: { type: Type.STRING },
+                        translatedText: { type: Type.STRING },
                       },
+                      required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
                     },
                   },
+                  signal,
                 });
 
-                if (transResponse.text) {
-                  const fixed = JSON.parse(transResponse.text);
-                  if (Array.isArray(fixed) && fixed.length > 0) {
-                    subtitles = sanitizeAndFixOverlaps(fixed);
-                  }
+                if (Array.isArray(fixed) && fixed.length > 0) {
+                  subtitles = sanitizeAndFixOverlaps(fixed);
                 }
               } catch (transErr) {
                 console.warn('[Language Guard] Fallback translation warning:', transErr);
@@ -277,29 +227,8 @@ ${JSON.stringify(subtitles, null, 2)}`;
             ai.files.delete({ name: uploadedFile.name }).catch(() => {});
           }
 
-          const isRetryableError =
-            error.status === 429 ||
-            error.status === 404 ||
-            error.status === 503 ||
-            error.message?.includes('429') ||
-            error.message?.includes('404') ||
-            error.message?.includes('503') ||
-            error.message?.includes('Quota') ||
-            error.message?.includes('RESOURCE_EXHAUSTED') ||
-            error.message?.includes('UNAVAILABLE') ||
-            error.message?.includes('high demand') ||
-            error.message?.includes('not found') ||
-            error.message?.includes('no longer available') ||
-            error.message?.includes('fetch failed') ||
-            error.message?.includes('timeout') ||
-            error.message?.includes('stream') ||
-            error.message?.includes('ETIMEDOUT') ||
-            error.message?.includes('ECONNRESET') ||
-            error.message?.includes('UND_ERR');
-
-          if (!isRetryableError) {
-            throw err;
-          }
+          // Continue to the next key/model on every failure (retryable or not)
+          // so a permanent error on one model cannot kill the whole pipeline.
         }
       }
     }

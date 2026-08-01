@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { SubtitleItem } from '@/lib/types';
 import { generateSRT, generateVTT, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
-import { Download, FileText, Video, X, Loader2, Clock, StopCircle, Zap } from 'lucide-react';
+import { Download, FileText, X, Loader2, Clock, Zap } from 'lucide-react';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -20,19 +20,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   videoUrl,
   selectedFile,
 }) => {
-  const [isExportingVideo, setIsExportingVideo] = useState(false);
   const [isFFmpegExporting, setIsFFmpegExporting] = useState(false);
   const [ffmpegStatus, setFfmpegStatus] = useState('');
-  const [exportProgress, setExportProgress] = useState(0);
-  const [estRemainingSecs, setEstRemainingSecs] = useState(0);
 
   // Dynamic Styling States
   const [fontSize, setFontSize] = useState(22);
   const [primaryColor, setPrimaryColor] = useState('FFFFFF');
   const [borderStyle, setBorderStyle] = useState(4); // 4 = Box background
-
-  const cancelExportRef = useRef(false);
-  const activeVideoRef = useRef<HTMLVideoElement | null>(null);
 
   if (!isOpen) return null;
 
@@ -58,13 +52,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handleCancelExport = () => {
-    cancelExportRef.current = true;
-    if (activeVideoRef.current) {
-      activeVideoRef.current.pause();
-    }
-    setIsExportingVideo(false);
-  };
+  const handleCancelExport = () => {};
 
   // 🚀 FFmpeg Server-Side High-Speed Hardsub Export (5x - 10x Speed, Perfect Audio Sync)
   // 🚀 FFmpeg Server-Side High-Speed Hardsub Export (GPU Accelerated + Async Polling)
@@ -117,7 +105,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
       if (!uploadRes.ok) {
         let errData;
-        try { errData = await uploadRes.json(); } catch (e) {}
+        try { errData = await uploadRes.json(); } catch {}
         throw new Error(errData?.error || `Upload failed with HTTP ${uploadRes.status}`);
       }
 
@@ -169,160 +157,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
   };
 
-  // Client-side Canvas Fallback Hardsub Rendering
-  const handleExportHardsubVideo = async () => {
-    if (!videoUrl) return;
-
-    setIsExportingVideo(true);
-    setExportProgress(0);
-    cancelExportRef.current = false;
-
-    try {
-      const tempVideo = document.createElement('video');
-      tempVideo.src = videoUrl;
-      tempVideo.crossOrigin = 'anonymous';
-      tempVideo.muted = true;
-      tempVideo.volume = 1.0;
-      activeVideoRef.current = tempVideo;
-
-      await new Promise((resolve) => {
-        tempVideo.onloadedmetadata = resolve;
-      });
-
-      const renderSpeed = 1.0;
-      tempVideo.playbackRate = renderSpeed;
-
-      const canvas = document.createElement('canvas');
-      canvas.width = tempVideo.videoWidth || 1280;
-      canvas.height = tempVideo.videoHeight || 720;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Could not get canvas context');
-
-      const canvasStream = canvas.captureStream(30);
-
-      let audioTracks: MediaStreamTrack[] = [];
-      let audioCtx: AudioContext | null = null;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const source = audioCtx.createMediaElementSource(tempVideo);
-        const dest = audioCtx.createMediaStreamDestination();
-        source.connect(dest);
-        audioTracks = dest.stream.getAudioTracks();
-      } catch (e) {
-        console.warn('Audio rerouting fallback:', e);
-      }
-
-      const combinedStream = new MediaStream([
-        ...canvasStream.getVideoTracks(),
-        ...audioTracks,
-      ]);
-
-      const mediaRecorder = new MediaRecorder(combinedStream, {
-        mimeType: 'video/webm;codecs=vp9,opus',
-      });
-
-      const chunks: Blob[] = [];
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
-
-      mediaRecorder.onstop = () => {
-        if (audioCtx) {
-          audioCtx.close().catch(() => {});
-        }
-        if (!cancelExportRef.current && chunks.length > 0) {
-          const blob = new Blob(chunks, { type: 'video/webm' });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = 'hardsub_video.webm';
-          link.click();
-          URL.revokeObjectURL(url);
-        }
-        setIsExportingVideo(false);
-        activeVideoRef.current = null;
-      };
-
-      mediaRecorder.start();
-      tempVideo.currentTime = 0;
-      await tempVideo.play();
-
-      const duration = tempVideo.duration;
-
-      const renderFrame = () => {
-        if (cancelExportRef.current || tempVideo.paused || tempVideo.ended) {
-          mediaRecorder.stop();
-          return;
-        }
-
-        ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
-
-        const curTime = tempVideo.currentTime;
-        const pct = Math.min(100, Math.round((curTime / duration) * 100));
-        setExportProgress(pct);
-
-        const remainingVidSecs = Math.max(0, duration - curTime);
-        const estSecs = Math.round(remainingVidSecs / renderSpeed);
-        setEstRemainingSecs(estSecs);
-
-        const activeSub = subtitles.find(
-          (s) => curTime >= s.startTime && curTime <= s.endTime
-        );
-
-        if (activeSub) {
-          const fontSize = Math.max(18, Math.round(canvas.height * 0.045));
-          ctx.font = `600 ${fontSize}px sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-
-          const text = activeSub.translatedText;
-          const padding = 16;
-          const textMetrics = ctx.measureText(text);
-          const rectWidth = textMetrics.width + padding * 2;
-          const rectHeight = fontSize + padding;
-          const x = canvas.width / 2;
-          const y = canvas.height - canvas.height * 0.08;
-
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
-          ctx.beginPath();
-          ctx.roundRect(
-            x - rectWidth / 2,
-            y - rectHeight + 4,
-            rectWidth,
-            rectHeight,
-            12
-          );
-          ctx.fill();
-
-          ctx.fillStyle = '#FFFFFF';
-          ctx.fillText(text, x, y);
-        }
-
-        requestAnimationFrame(renderFrame);
-      };
-
-      renderFrame();
-    } catch (err) {
-      console.error('Hardsub export failed:', err);
-      alert('Failed to export hardsub video. Please try downloading .srt instead.');
-      setIsExportingVideo(false);
-      activeVideoRef.current = null;
-    }
-  };
-
-  const formatEstTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m > 0 ? `${m}m ` : ''}${s}s`;
-  };
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
-      <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-2xl space-y-6">
-        <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
-            <Download className="w-5 h-5 text-blue-400" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#050507]/80 backdrop-blur-md animate-fade-in">
+      <div className="w-full max-w-md bg-[#0f0f14] border border-[#232334] rounded-2xl p-6 shadow-2xl space-y-6">
+        <div className="flex items-center justify-between border-b border-[#232334] pb-4">
+          <h3 className="text-base font-bold text-zinc-100 flex items-center gap-2">
+            <Download className="w-5 h-5 text-cyan-400" />
             <span>Export Subtitles</span>
           </h3>
           <button
@@ -330,7 +170,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               handleCancelExport();
               onClose();
             }}
-            className="p-1 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
+            className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-[#161620] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -340,10 +180,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           {/* SRT Export Option */}
           <button
             onClick={handleDownloadSRT}
-            className="w-full flex items-center justify-between p-4 rounded-xl bg-zinc-950/80 border border-zinc-800 hover:border-blue-500/50 hover:bg-zinc-950 transition-all text-left group"
+            className="w-full flex items-center justify-between p-3.5 rounded-xl bg-[#09090e] border border-[#232334] hover:border-cyan-500/50 hover:bg-[#12121a] transition-all text-left group"
           >
             <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-lg bg-blue-500/10 text-blue-400 group-hover:scale-110 transition-transform">
+              <div className="p-2.5 rounded-lg bg-cyan-500/10 text-cyan-400 group-hover:scale-110 transition-transform">
                 <FileText className="w-5 h-5" />
               </div>
               <div>
@@ -351,13 +191,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <p className="text-xs text-zinc-500">Standard subtitle format (Instant download)</p>
               </div>
             </div>
-            <Download className="w-4 h-4 text-zinc-500 group-hover:text-blue-400 transition-colors" />
+            <Download className="w-4 h-4 text-zinc-500 group-hover:text-cyan-400 transition-colors" />
           </button>
 
           {/* VTT Export Option */}
           <button
             onClick={handleDownloadVTT}
-            className="w-full flex items-center justify-between p-4 rounded-xl bg-zinc-950/80 border border-zinc-800 hover:border-purple-500/50 hover:bg-zinc-950 transition-all text-left group"
+            className="w-full flex items-center justify-between p-3.5 rounded-xl bg-[#09090e] border border-[#232334] hover:border-purple-500/50 hover:bg-[#12121a] transition-all text-left group"
           >
             <div className="flex items-center gap-3">
               <div className="p-2.5 rounded-lg bg-purple-500/10 text-purple-400 group-hover:scale-110 transition-transform">
@@ -372,7 +212,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </button>
 
           {/* Dynamic Style Customization Section */}
-          <div className="p-3.5 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-3">
+          <div className="p-3.5 rounded-xl bg-[#09090e] border border-[#232334] space-y-3">
             <p className="text-xs font-semibold text-zinc-300 flex items-center justify-between">
               <span>Subtitle Hardsub Style (ตั้งค่าสไตล์ซับ)</span>
             </p>
@@ -384,7 +224,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={fontSize}
                   onChange={(e) => setFontSize(Number(e.target.value))}
-                  className="w-full bg-zinc-900 border border-zinc-700/80 rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
+                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
                 >
                   <option value={18}>Small (18px)</option>
                   <option value={22}>Normal (22px)</option>
@@ -398,7 +238,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={primaryColor}
                   onChange={(e) => setPrimaryColor(e.target.value)}
-                  className="w-full bg-zinc-900 border border-zinc-700/80 rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
+                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
                 >
                   <option value="FFFFFF">White (ขาว)</option>
                   <option value="FFFF00">Yellow (เหลือง)</option>
@@ -412,7 +252,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={borderStyle}
                   onChange={(e) => setBorderStyle(Number(e.target.value))}
-                  className="w-full bg-zinc-900 border border-zinc-700/80 rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
+                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
                 >
                   <option value={4}>Black Box (กล่อง)</option>
                   <option value={1}>Outline Only (ขอบ)</option>
@@ -424,9 +264,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           {/* ⭐ FFmpeg High-Speed Hardsub Video Option */}
           <div className="space-y-2">
             <button
-              disabled={(!videoUrl && !selectedFile) || isFFmpegExporting || isExportingVideo}
+              disabled={(!videoUrl && !selectedFile) || isFFmpegExporting}
               onClick={handleFFmpegExportHardsub}
-              className="w-full flex items-center justify-between p-4 rounded-xl bg-gradient-to-r from-emerald-950/80 to-teal-950/80 border border-emerald-500/40 hover:border-emerald-400 hover:bg-emerald-950/90 transition-all text-left group disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-950/30"
+              className="w-full flex items-center justify-between p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/80 to-teal-950/80 border border-emerald-500/40 hover:border-emerald-400 hover:bg-emerald-950/90 transition-all text-left group disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-950/30"
             >
               <div className="flex items-center gap-3">
                 <div className="p-2.5 rounded-lg bg-emerald-500/20 text-emerald-400 group-hover:scale-110 transition-transform">
@@ -452,7 +292,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </button>
 
             {isFFmpegExporting && (
-              <div className="p-3 rounded-xl bg-zinc-950 border border-emerald-500/40 space-y-2 text-xs">
+              <div className="p-3 rounded-xl bg-[#050507] border border-emerald-500/40 space-y-2 text-xs">
                 <div className="flex items-center gap-2 text-emerald-400 font-medium animate-pulse">
                   <Clock className="w-4 h-4 animate-spin" />
                   <span>{ffmpegStatus}</span>

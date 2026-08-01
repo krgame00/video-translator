@@ -49,8 +49,8 @@ async function refineChunk6() {
 
       console.log(`✔ Chunk 6 completed: ${chunkSubtitles.length} subtitle lines generated.`);
       fs.writeFileSync(jsonCachePath, JSON.stringify(chunkSubtitles, null, 2), 'utf8');
-    } catch (e: any) {
-      console.warn(`[Reprocess Chunk 6] Error:`, e.message);
+    } catch (e: unknown) {
+      console.warn(`[Reprocess Chunk 6] Error:`, e instanceof Error ? e.message : e);
     }
   }
 
@@ -67,7 +67,7 @@ async function refineChunk6() {
       try {
         const subs = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
         chunkResults.push({ chunkStartTime, subtitles: subs });
-      } catch (e) {}
+      } catch {}
     }
   }
 

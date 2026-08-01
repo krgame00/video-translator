@@ -1,25 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenAI, Type } from '@google/genai';
 import { SubtitleItem } from '@/lib/types';
+import { requestJSON, SUBTITLE_ARRAY_SCHEMA } from '@/lib/geminiClient';
+import { readJsonBody, HttpError } from '@/lib/security';
+import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
 
-function getApiKeys(): string[] {
-  const raw = process.env.GEMINI_API_KEY || '';
-  const keys = raw.split(',').map((k) => k.trim()).filter((k) => k.length > 0);
-  if (keys.length === 0) {
-    throw new Error('GEMINI_API_KEY environment variable is missing.');
-  }
-  return keys;
-}
+export const maxDuration = 300; // Allow up to 5 minutes for large refinement batches
 
-const modelsToTry = [
-  'gemini-3.5-flash-lite',
-  'gemini-3.6-flash',
-  'gemini-3-flash',
-  'gemini-3.5-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-];
+const BATCH_SIZE = 100;
 
 const STYLE_PROMPTS: Record<string, string> = {
   anime: 'Refine the Thai translated subtitles into emotional, expressive Anime/Manga style spoken Thai dialogue (สำนวนอนิเมะ/มังงะ สนุกสนาน มีอารมณ์ร่วม ธรรมชาติ).',
@@ -31,7 +18,10 @@ const STYLE_PROMPTS: Record<string, string> = {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = (await readJsonBody(req)) as {
+      subtitles?: SubtitleItem[];
+      style?: string;
+    };
     const subtitles: SubtitleItem[] = body.subtitles || [];
     const style = (body.style as string) || 'anime';
 
@@ -42,78 +32,57 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const apiKeys = getApiKeys();
     const promptInstruction = STYLE_PROMPTS[style] || STYLE_PROMPTS.anime;
+    const results: SubtitleItem[] = [];
 
-    const prompt = `You are a World-Class Professional Subtitle Proofreader & Editor.
+    // Refine in batches so long subtitle lists never hit prompt/output limits
+    for (let i = 0; i < subtitles.length; i += BATCH_SIZE) {
+      const batch = subtitles.slice(i, i + BATCH_SIZE);
+
+      const prompt = `You are a World-Class Professional Subtitle Proofreader & Editor.
 ${promptInstruction}
 
 CRITICAL RULES:
-1. Preserve exact id, startTime, endTime, and originalText for every subtitle item verbatim.
+1. Preserve exact id, startTime, endTime, and originalText for every subtitle item verbatim (format "HH:MM:SS.mmm").
 2. Improve translatedText to perfectly match the requested style preset.
 3. Keep the output strictly in the requested JSON schema array format.
 
 Input Subtitles to Refine:
-${JSON.stringify(subtitles, null, 2)}`;
+${JSON.stringify(batch, null, 2)}`;
 
-    let lastError: unknown = null;
+      const raw = await requestJSON<
+        { id: string; startTime: string | number; endTime: string | number; originalText: string; translatedText: string }[]
+      >({
+        prompt,
+        schema: SUBTITLE_ARRAY_SCHEMA,
+        signal: req.signal,
+      });
 
-    for (const apiKey of apiKeys) {
-      const ai = new GoogleGenAI({ apiKey });
-
-      for (const modelName of modelsToTry) {
-        try {
-          const response = await ai.models.generateContent({
-            model: modelName,
-            contents: prompt,
-            config: {
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING },
-                    startTime: { type: Type.NUMBER },
-                    endTime: { type: Type.NUMBER },
-                    originalText: { type: Type.STRING },
-                    translatedText: { type: Type.STRING },
-                  },
-                  required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
-                },
-              },
-            },
-          });
-
-          const responseText = response.text;
-          if (!responseText) {
-            throw new Error('Gemini API returned an empty response.');
-          }
-
-          const refinedSubtitles: SubtitleItem[] = JSON.parse(responseText);
-
-          return NextResponse.json({
-            success: true,
-            subtitles: refinedSubtitles,
-          });
-        } catch (err: unknown) {
-          lastError = err;
-          const errMessage = err instanceof Error ? err.message : String(err);
-          console.warn(`[Refine Subtitles] Attempt failed with model ${modelName}:`, errMessage);
-        }
+      for (const item of raw || []) {
+        results.push({
+          id: item.id,
+          startTime: parseTimestampToSeconds(item.startTime),
+          endTime: parseTimestampToSeconds(item.endTime),
+          originalText: String(item.originalText || '').trim(),
+          translatedText: String(item.translatedText || '').trim(),
+        });
       }
     }
 
-    throw lastError || new Error('All API keys and Gemini models failed or exceeded quota.');
+    return NextResponse.json({
+      success: true,
+      subtitles: sanitizeAndFixOverlaps(results),
+    });
   } catch (error: unknown) {
     console.error('Error refining subtitles:', error);
     const errMessage = error instanceof Error ? error.message : String(error);
+    const status = error instanceof HttpError ? error.status : 500;
     return NextResponse.json(
       {
         success: false,
         error: errMessage || 'An error occurred during subtitle refinement.',
       },
-      { status: 500 }
+      { status }
     );
   }
 }

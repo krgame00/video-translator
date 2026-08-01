@@ -4,23 +4,19 @@ import { SubtitleItem } from './types';
 function testErrorHandling() {
   // Test parseTimestampToSeconds with invalid inputs - should throw
   try {
-    const result = parseTimestampToSeconds('invalid-format');
+    parseTimestampToSeconds('invalid-format');
     console.assert(false, 'Should throw on invalid format');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.assert(msg.includes('Invalid timestamp format'), `Expected error message for invalid format, got: ${msg}`);
   }
 
-  try {
-    const result = parseTimestampToSeconds('');
-    console.assert(false, 'Should throw on empty string');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.assert(msg.includes('Invalid timestamp format'), `Expected error message for empty string, got: ${msg}`);
-  }
+  // Empty string returns 0 (defensive, does not throw)
+  const emptyParseResult = parseTimestampToSeconds('');
+  console.assert(emptyParseResult === 0, `Empty string should return 0, got: ${emptyParseResult}`);
 
   try {
-    const result = parseTimestampToSeconds('not-a-timestamp');
+    parseTimestampToSeconds('not-a-timestamp');
     console.assert(false, 'Should throw on non-timestamp');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -100,4 +96,4 @@ function testErrorHandling() {
   console.log('✅ srtFormatter error handling tests passed successfully!');
 }
 
-testErrorHandling();
+test('srtFormatter error handling', testErrorHandling);

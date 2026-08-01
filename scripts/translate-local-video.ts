@@ -85,7 +85,7 @@ async function runLocalVideoTranslation(videoPath: string, targetLanguage: strin
           console.log(`   ⚡ Chunk ${i + 1}/${chunkFiles.length} loaded from cache (${cachedSubs.length} subtitle lines).`);
           chunkResults.push({ chunkStartTime, subtitles: cachedSubs });
           continue;
-        } catch (e) {
+        } catch {
           console.warn(`   ⚠️ Cache corrupted for chunk ${i + 1}, re-processing...`);
         }
       }
@@ -115,8 +115,9 @@ async function runLocalVideoTranslation(videoPath: string, targetLanguage: strin
 
           success = true;
           break;
-        } catch (err: any) {
-          console.warn(`   ⚠️ Chunk ${i + 1} attempt ${attempt} failed: ${err.message}`);
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(`   ⚠️ Chunk ${i + 1} attempt ${attempt} failed: ${errMsg}`);
           if (attempt < maxRetries) {
             console.log(`   🔄 Waiting 5s before retrying Chunk ${i + 1}...`);
             await new Promise((r) => setTimeout(r, 5000));
@@ -161,9 +162,10 @@ async function runLocalVideoTranslation(videoPath: string, targetLanguage: strin
     // Clean up cache after successful full completion
     try {
       fs.rmSync(cacheDir, { recursive: true, force: true });
-    } catch (e) {}
+    } catch {
+    }
 
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error(`❌ Error during video translation:`, err);
   }
 }

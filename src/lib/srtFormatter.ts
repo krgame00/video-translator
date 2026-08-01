@@ -220,6 +220,31 @@ export function parseTimestampToSeconds(input: string | number | undefined | nul
 }
 
 /**
+ * Chunks overlap by ~1.5s, so a word straddling a boundary can be transcribed
+ * twice (once per adjacent chunk). Drop a new item when an existing one starts
+ * within the overlap window AND shares most of its text.
+ */
+function isNearBoundaryDuplicate(prev: SubtitleItem, next: SubtitleItem): boolean {
+  if (Math.abs(prev.startTime - next.startTime) > 1.6) return false;
+
+  const normalize = (s: string) =>
+    s.toLowerCase().replace(/[\s.,!?;:"'()\[\]{}《》<>「」『』]/g, '');
+
+  const a = normalize(prev.translatedText);
+  const b = normalize(next.translatedText);
+  if (!a || !b || Math.min(a.length, b.length) < 4) return false;
+
+  const shorter = a.length < b.length ? a : b;
+  const longer = a.length < b.length ? b : a;
+
+  let common = 0;
+  for (const ch of shorter) {
+    if (longer.includes(ch)) common++;
+  }
+  return common / longer.length > 0.7;
+}
+
+/**
  * Merges subtitle results from multiple audio chunks, shifting timestamps by chunk.chunkStartTime
  */
 export function mergeChunkSubtitles(
@@ -243,7 +268,13 @@ export function mergeChunkSubtitles(
     }
   }
 
-  return sanitizeAndFixOverlaps(allItems);
+  const deduped: SubtitleItem[] = [];
+  for (const item of allItems) {
+    const isDup = deduped.some((prev) => isNearBoundaryDuplicate(prev, item));
+    if (!isDup) deduped.push(item);
+  }
+
+  return sanitizeAndFixOverlaps(deduped);
 }
 
 /**

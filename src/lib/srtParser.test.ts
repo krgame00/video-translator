@@ -25,4 +25,4 @@ This is line two.
   console.log('✅ parseSRT unit tests passed successfully!');
 }
 
-testSRTParser();
+test('srtParser', testSRTParser);

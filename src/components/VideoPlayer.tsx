@@ -2,7 +2,7 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { SubtitleItem } from '@/lib/types';
-import { Settings, Type, Palette } from 'lucide-react';
+import { Settings, Type } from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -26,7 +26,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg' | 'xl'>('lg');
   const [textColor, setTextColor] = useState<string>('#FFFFFF');
   const [position, setPosition] = useState<'bottom' | 'top'>('bottom');
-  const [bgStyle, setBgStyle] = useState<'glass' | 'dark' | 'none'>('glass');
+  const [bgStyle] = useState<'glass' | 'dark' | 'none'>('glass');
 
   // Synchronize seek requests from parent/SubtitleEditor
   useEffect(() => {

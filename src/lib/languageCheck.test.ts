@@ -1,5 +1,3 @@
-import { SubtitleItem } from './types';
-
 function hasThaiCharacters(text: string): boolean {
   return /[\u0E00-\u0E7F]/.test(text);
 }
@@ -16,4 +14,4 @@ function testLanguageCheck() {
   console.log('✅ languageCheck unit tests passed successfully!');
 }
 
-testLanguageCheck();
+test('languageCheck', testLanguageCheck);

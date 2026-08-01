@@ -21,7 +21,7 @@ function testErrorHandling() {
   console.assert(Array.isArray(specialCharSearch), 'Special characters should not throw');
 
   // Test searchSubtitles with null/undefined items (defensive)
-  const withNull = [...mockSubtitles, null as any];
+  const withNull = [...mockSubtitles, null as unknown as SubtitleItem];
   const nullSearch = searchSubtitles(withNull, 'test');
   console.assert(Array.isArray(nullSearch), 'Should handle null items gracefully');
 
@@ -35,12 +35,12 @@ function testErrorHandling() {
   console.assert(emptyFindReplace[0].translatedText === mockSubtitles[0].translatedText, 'Items should be unchanged with empty find');
 
   // Test findAndReplaceSubtitles with non-existent field
-  const invalidFieldReplace = findAndReplaceSubtitles(mockSubtitles, 'test', 'replace', 'invalidField' as any, false);
+  const invalidFieldReplace = findAndReplaceSubtitles(mockSubtitles, 'test', 'replace', 'invalidField' as unknown as 'translatedText', false);
   console.assert(invalidFieldReplace.length === mockSubtitles.length, 'Invalid field should return original array');
 
   // Test findAndReplaceSubtitles with items missing the target field
   const itemsMissingField = [...mockSubtitles, { id: '4', startTime: 10, endTime: 12, originalText: 'Test', translatedText: '' }];
-  // @ts-ignore - deliberately removing translatedText
+  // @ts-expect-error - deliberately removing translatedText
   delete itemsMissingField[3].translatedText;
   const missingFieldReplace = findAndReplaceSubtitles(itemsMissingField as SubtitleItem[], 'test', 'replace', 'translatedText', false);
   console.assert(missingFieldReplace.length === 4, 'Should handle missing fields gracefully');
@@ -57,4 +57,4 @@ function testErrorHandling() {
   console.log('✅ subtitleUtils error handling tests passed successfully!');
 }
 
-testErrorHandling();
+test('subtitleUtils error handling', testErrorHandling);

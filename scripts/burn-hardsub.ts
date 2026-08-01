@@ -48,7 +48,7 @@ async function burnHardsubVideo() {
     console.error(`❌ Encoding Error:`, err);
   } finally {
     if (fs.existsSync(tempSrtPath)) {
-      try { fs.unlinkSync(tempSrtPath); } catch (e) {}
+      try { fs.unlinkSync(tempSrtPath); } catch {}
     }
   }
 

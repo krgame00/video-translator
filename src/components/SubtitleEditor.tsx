@@ -118,7 +118,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
     if (autoScroll && activeSubtitleId && activeCardRef.current) {
       activeCardRef.current.scrollIntoView({
         behavior: 'smooth',
-        block: 'nearest',
+        block: 'center',
       });
     }
   }, [activeSubtitleId, autoScroll]);
@@ -160,7 +160,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   return (
     <div className="flex flex-col h-full bg-zinc-950/80 border border-zinc-800/80 rounded-2xl overflow-hidden backdrop-blur-xl">
       {/* Header Controls */}
-      <div className="flex flex-wrap items-center justify-between px-5 py-4 border-b border-zinc-800/80 bg-zinc-900/40 gap-3">
+      <div className="flex flex-wrap items-center justify-between p-3 sm:px-5 sm:py-4 border-b border-zinc-800/80 bg-zinc-900/40 gap-3">
         <div>
           <h2 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <span>Subtitles List</span>

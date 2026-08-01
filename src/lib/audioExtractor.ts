@@ -36,9 +36,21 @@ export async function extractAudioChunks(
   file: File,
   chunkDurationSecs: number = 300
 ): Promise<AudioChunk[]> {
-  const arrayBuffer = await file.arrayBuffer();
-  const dummyCtx = new OfflineAudioContext(1, 16000, 16000);
-  const audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
+  let arrayBuffer: ArrayBuffer;
+  let audioBuffer: AudioBuffer;
+
+  try {
+    arrayBuffer = await file.arrayBuffer();
+    const webkitOfflineCtx = (window as typeof window & { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
+    const dummyCtx = new (window.OfflineAudioContext || webkitOfflineCtx)(1, 16000, 16000);
+    audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg.includes('allocation') || errMsg.includes('buffer') || err instanceof RangeError) {
+      throw new Error(`เบราว์เซอร์หน่วยความจำ (RAM) ไม่พอสำหรับอ่านไฟล์ขนาดใหญ่ (${(file.size / 1024 / 1024).toFixed(0)}MB) กรุณาใช้ไฟล์ที่ขนาดเล็กลง หรือแปลงไฟล์วิดีโอนี้เป็น .mp3 หรือ .wav ก่อนอัปโหลดครับ`);
+    }
+    throw new Error(`Browser failed to decode audio track: ${errMsg}`);
+  }
 
   const targetSampleRate = 16000;
   const duration = audioBuffer.duration;

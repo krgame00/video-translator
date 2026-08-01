@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processVideoSubtitlesFromStream } from '@/lib/geminiVideoService';
+import { assertContentLength, HttpError } from '@/lib/security';
 
 export const maxDuration = 300; // Allow up to 5 minutes for video processing
 
 export async function POST(req: NextRequest) {
   try {
+    assertContentLength(req);
+
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     const targetLanguage = (formData.get('targetLanguage') as string) || 'th';
@@ -21,7 +24,8 @@ export async function POST(req: NextRequest) {
       file.stream() as unknown as ReadableStream<Uint8Array>,
       file.type || 'video/mp4',
       file.name,
-      targetLanguage
+      targetLanguage,
+      req.signal
     );
 
     return NextResponse.json({
@@ -31,12 +35,13 @@ export async function POST(req: NextRequest) {
   } catch (error: unknown) {
     console.error('Error processing video subtitles:', error);
     const errMessage = error instanceof Error ? error.message : String(error);
+    const status = error instanceof HttpError ? error.status : 500;
     return NextResponse.json(
       {
         success: false,
         error: errMessage || 'An unexpected error occurred during processing.',
       },
-      { status: 500 }
+      { status }
     );
   }
 }

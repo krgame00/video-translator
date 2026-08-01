@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parseSRT, generateSRT } from '../src/lib/srtFormatter';
-import { SubtitleItem } from '../src/lib/types';
 import { GoogleGenAI, Type } from '@google/genai';
 
 // Load .env.local manually

@@ -17,7 +17,6 @@ import { env } from './env';
  */
 export function cleanExpiredTempFiles(
   maxAgeMs: number = 3600 * 1000,
-  maxItems: number = 50,
   maxTotalSizeMb: number = 2048 // 2GB Quota
 ): number {
   const tempDir = env.tempDir || os.tmpdir();
@@ -106,8 +105,8 @@ export function triggerBackgroundTempCleanup(maxAgeMs: number = 3600 * 1000): vo
   setTimeout(() => {
     try {
       cleanExpiredTempFiles(maxAgeMs);
-    } catch (e) {
-      console.warn('[Temp Cleaner Background Error]:', e);
+    } catch (err) {
+      console.warn('[Temp Cleaner Background Error]:', err);
     }
   }, 100);
 }

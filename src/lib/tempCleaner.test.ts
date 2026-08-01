@@ -52,4 +52,4 @@ function testTempCleaner() {
   console.log('✅ cleanExpiredTempFiles unit tests passed successfully!');
 }
 
-testTempCleaner();
+test('tempCleaner', testTempCleaner);

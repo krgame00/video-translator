@@ -9,7 +9,6 @@ function testErrorHandling() {
   const twoHoursAgo = now - 2 * 3600 * 1000;
 
   // Test 1: Non-existent directory (should not throw, return 0)
-  const nonExistentDir = path.join(tempDir, `test_nonexistent_${now}`);
   try {
     // We can't easily test this without modifying the function to accept a custom path
     // but we can test that the function handles missing directory gracefully
@@ -28,7 +27,7 @@ function testErrorHandling() {
   let fd;
   try {
     fd = fs.openSync(lockedFile, 'r');
-    const deletedCount = cleanExpiredTempFiles(3600 * 1000);
+    cleanExpiredTempFiles(3600 * 1000);
     // On Windows, file cannot be deleted while open
     const exists = fs.existsSync(lockedFile);
     console.assert(exists, 'Locked file should not be deleted on Windows');
@@ -62,7 +61,7 @@ function testErrorHandling() {
   const futureTime = now + 3600 * 1000; // 1 hour in future
   fs.utimesSync(futureFile, futureTime / 1000, futureTime / 1000);
 
-  const deletedCountFuture = cleanExpiredTempFiles(3600 * 1000);
+  cleanExpiredTempFiles(3600 * 1000);
   const futureExists = fs.existsSync(futureFile);
   console.assert(futureExists, 'Future file should NOT be deleted');
   if (fs.existsSync(futureFile)) fs.unlinkSync(futureFile);
@@ -76,7 +75,7 @@ function testErrorHandling() {
     fs.utimesSync(f, twoHoursAgo / 1000, twoHoursAgo / 1000);
     manyFiles.push(f);
   }
-  const deletedMany = cleanExpiredTempFiles(3600 * 1000, 50, 1); // 1MB quota
+  const deletedMany = cleanExpiredTempFiles(3600 * 1000, 1); // 1MB quota
   console.assert(deletedMany > 0, 'Should delete some files when over quota');
 
   // Cleanup many files
@@ -87,4 +86,4 @@ function testErrorHandling() {
   console.log('✅ tempCleaner error handling tests passed successfully!');
 }
 
-testErrorHandling();
+test('tempCleaner error handling', testErrorHandling);

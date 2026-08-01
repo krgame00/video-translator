@@ -5,9 +5,9 @@ import { SubtitleItem } from '@/lib/types';
 import { VideoPlayer } from '@/components/VideoPlayer';
 import { WaveformVisualizer } from '@/components/WaveformVisualizer';
 import dynamic from 'next/dynamic';
-import { Upload, Sparkles, Download, Languages, Video, AlertCircle, Loader2, Clock, CheckCircle2, XCircle, Command, RotateCcw, HelpCircle } from 'lucide-react';
+import { Upload, Sparkles, Download, Languages, Video, AlertCircle, Loader2, Clock, XCircle, Command, RotateCcw, HelpCircle } from 'lucide-react';
 
-import { extractAudioFromVideo, extractAudioChunks } from '@/lib/audioExtractor';
+import { extractAudioChunks, AudioChunk } from '@/lib/audioExtractor';
 import { mergeChunkSubtitles } from '@/lib/srtFormatter';
 
 const SubtitleEditor = dynamic(() => import('@/components/SubtitleEditor').then(mod => ({ default: mod.SubtitleEditor })), { ssr: false });
@@ -192,30 +192,63 @@ export default function Home() {
 
         let completedChunks = 0;
         const CONCURRENCY_LIMIT = 3;
-        const chunkResults = [];
+        const MAX_ATTEMPTS = 3;
+        const failedChunks: number[] = [];
+        const chunkResults: { chunkStartTime: number; subtitles: SubtitleItem[] }[] = [];
+
+        const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        const processChunk = async (chunk: AudioChunk) => {
+          const formData = new FormData();
+          formData.append('file', chunk.blob, `chunk_${chunk.chunkIndex}.wav`);
+          formData.append('targetLanguage', targetLanguage);
+          formData.append('chunkIndex', String(chunk.chunkIndex));
+          formData.append('chunkStartTime', String(chunk.startTime));
+
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+              const res = await fetch('/api/video-translate-chunk', { method: 'POST', body: formData, signal: controller.signal });
+              const data = await res.json();
+              if (!data.success) throw new Error(data.error || `Failed on chunk ${chunk.chunkIndex + 1}`);
+              completedChunks++;
+              setStatusMessage(`กำลังประมวลผล Gemini Parallel Stream (${completedChunks}/${chunks.length} ท่อนสำเร็จแล้ว)...`);
+              return { chunkStartTime: chunk.startTime, subtitles: data.subtitles || [] };
+            } catch (err: unknown) {
+              if (err instanceof Error && err.name === 'AbortError') throw err;
+              if (attempt < MAX_ATTEMPTS) await delay(1500 * attempt);
+              else throw err;
+            }
+          }
+          return null;
+        };
         
         for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
           if (controller.signal.aborted) break;
           const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
           const batchResults = await Promise.all(batch.map(async (chunk) => {
-            const formData = new FormData();
-            formData.append('file', chunk.blob, `chunk_${chunk.chunkIndex}.wav`);
-            formData.append('targetLanguage', targetLanguage);
-            formData.append('chunkIndex', String(chunk.chunkIndex));
-            formData.append('chunkStartTime', String(chunk.startTime));
-            const res = await fetch('/api/video-translate-chunk', { method: 'POST', body: formData, signal: controller.signal });
-            const data = await res.json();
-            if (!data.success) throw new Error(data.error || `Failed on chunk ${chunk.chunkIndex + 1}`);
-            completedChunks++;
-            setStatusMessage(`กำลังประมวลผล Gemini Parallel Stream (${completedChunks}/${chunks.length} ท่อนสำเร็จแล้ว)...`);
-            return { chunkStartTime: chunk.startTime, subtitles: data.subtitles || [] };
+            try {
+              return await processChunk(chunk);
+            } catch (err: unknown) {
+              if (err instanceof Error && err.name === 'AbortError') throw err;
+              failedChunks.push(chunk.chunkIndex);
+              console.warn(`Chunk ${chunk.chunkIndex + 1} failed after ${MAX_ATTEMPTS} attempts:`, err);
+              return null;
+            }
           }));
-          chunkResults.push(...batchResults);
+
+          chunkResults.push(...batchResults.filter(
+            (r): r is { chunkStartTime: number; subtitles: SubtitleItem[] } => r !== null
+          ));
         }
 
         if (!controller.signal.aborted) {
           const merged = mergeChunkSubtitles(chunkResults);
           setSubtitles(merged);
+          if (failedChunks.length > 0) {
+            setError(
+              `บางส่วนล้มเหลว (${failedChunks.length}/${chunks.length} chunks: ${failedChunks.map((c) => c + 1).join(', ')}). แสดงผลบางส่วนที่สำเร็จแล้ว.`
+            );
+          }
         }
       } else {
         setStatusMessage('กำลังส่งแทร็กเสียงไปยัง Gemini AI เพื่อถอดเสียงและแปลภาษา...');
@@ -473,7 +506,7 @@ export default function Home() {
           </div>
 
           {/* Right: Interactive Subtitle Editor Stage */}
-          <div className="lg:col-span-5 h-[620px] lg:h-auto min-h-0 flex flex-col">
+          <div className="lg:col-span-5 h-[500px] lg:h-[620px] min-h-0 overflow-hidden flex flex-col">
             <SubtitleEditor
               subtitles={subtitles}
               currentTime={currentTime}
