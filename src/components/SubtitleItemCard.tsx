@@ -23,7 +23,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = ({
     <div
       className={`group relative rounded-xl border p-4 transition-all duration-200 ${
         isActive
-          ? 'bg-gradient-to-r from-blue-950/40 via-purple-950/30 to-zinc-900 border-blue-500/60 shadow-lg shadow-blue-500/10'
+          ? 'bg-blue-600/10 border-blue-500/60'
           : 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900'
       }`}
     >

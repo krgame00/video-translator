@@ -13,6 +13,7 @@ interface SubtitleEditorProps {
   onSubtitlesChange: (subtitles: SubtitleItem[]) => void;
   onJumpTo: (time: number) => void;
   targetLanguage?: string;
+  notify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
 export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
@@ -21,6 +22,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   onSubtitlesChange,
   onJumpTo,
   targetLanguage = 'th',
+  notify,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeCardRef = useRef<HTMLDivElement>(null);
@@ -38,8 +40,13 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
 
   const handleExecuteReplace = () => {
     if (!findText) return;
+    const count = subtitles.reduce(
+      (n, s) => n + (s.translatedText.split(findText).length - 1),
+      0
+    );
     const updated = findAndReplaceSubtitles(subtitles, findText, replaceText, 'translatedText', matchCase);
     onSubtitlesChange(updated);
+    notify?.(`Replaced ${count || 'all'} occurrence(s) of "${findText}"`, 'info');
     setFindText('');
     setReplaceText('');
   };
@@ -54,9 +61,10 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       if (content) {
         const parsed = parseSRT(content);
         if (parsed.length === 0) {
-          alert('Could not parse any subtitles from the selected file. Please check file format.');
+          notify?.(`Could not parse subtitles from "${file.name}". Check format.`, 'error');
         } else {
           onSubtitlesChange(parsed);
+          notify?.(`Imported ${parsed.length} cues from ${file.name}`, 'success');
         }
       }
     };
@@ -77,9 +85,10 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         throw new Error(data.error || 'Failed to translate SRT subtitles.');
       }
       onSubtitlesChange(data.subtitles || []);
+      notify?.(`Translated ${(data.subtitles || []).length} cues`, 'success');
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : String(err);
-      alert('SRT Translation Error: ' + errMessage);
+      notify?.(`SRT translation error: ${errMessage}`, 'error');
     } finally {
       setIsTranslatingSRT(false);
     }
@@ -99,9 +108,10 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         throw new Error(data.error || 'Failed to refine subtitles.');
       }
       onSubtitlesChange(data.subtitles || []);
+      notify?.(`Refined ${(data.subtitles || []).length} cues`, 'success');
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : String(err);
-      alert('AI Refinement Error: ' + errMessage);
+      notify?.(`AI refinement error: ${errMessage}`, 'error');
     } finally {
       setIsRefining(false);
     }
@@ -150,6 +160,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
     };
 
     onSubtitlesChange([...subtitles, newItem]);
+    notify?.(`Added subtitle at ${startTime.toFixed(1)}s`, 'info');
   };
 
   const handleSortByTime = () => {
@@ -189,7 +200,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
               <button
                 disabled={isRefining}
                 onClick={handleRefineSubtitles}
-                className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-medium flex items-center gap-1 shadow-md shadow-purple-600/20 disabled:opacity-50 transition-all hover:scale-105"
+                className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50 transition-colors"
                 title="Refine Subtitle Tone & Style with AI"
               >
                 {isRefining ? (

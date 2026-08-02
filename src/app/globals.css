@@ -1,31 +1,131 @@
 @import "tailwindcss";
 
+/* ============================================================
+   Studio palette — "pre-dawn flight deck"
+   OKLCH. Neutral surfaces carry the mood; cobalt (primary) +
+   amber (signal accent) do the loud work. No gradients, no glass.
+   ============================================================ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* core surfaces (near-neutral cool) */
+  --bg: oklch(0.09 0.003 250);
+  --surface: oklch(0.115 0.006 250);
+  --surface-2: oklch(0.14 0.008 250);
+  --border: oklch(0.22 0.012 250);
+  --ink: oklch(0.95 0.008 250);
+  --muted: oklch(0.66 0.015 250);
+
+  /* brand -- primary = instrument cobalt, accent = signal amber */
+  --primary: oklch(0.65 0.15 250);
+  --primary-bright: oklch(0.72 0.13 250);
+  --accent: oklch(0.72 0.16 78);
+
+  /* semantic */
+  --ok: oklch(0.68 0.15 150);
+  --err: oklch(0.62 0.19 25);
+
+  /* layout tokens */
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --radius-pill: 999px;
+
+  /* z-scale: content(0) sticky(30) overlay(40) modal(50) toast(60) */
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-itim), var(--font-geist-sans), sans-serif;
-  --font-mono: var(--font-geist-mono);
+  /* semantic surface tokens */
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+
+  /* surface scale maps over the default zinc ramp (wide tailwind usage) */
+  --color-zinc-50: var(--ink);
+  --color-zinc-100: oklch(0.9 0.007 250);
+  --color-zinc-200: oklch(0.84 0.01 250);
+  --color-zinc-300: oklch(0.78 0.012 250);
+  --color-zinc-400: var(--muted);
+  --color-zinc-500: oklch(0.55 0.012 250);
+  --color-zinc-600: oklch(0.44 0.01 250);
+  --color-zinc-700: oklch(0.34 0.01 250);
+  --color-zinc-800: var(--border);
+  --color-zinc-850: oklch(0.18 0.008 250);
+  --color-zinc-900: var(--surface-2);
+  --color-zinc-950: var(--bg);
+
+  /* primary = cobalt */
+  --color-blue-300: oklch(0.78 0.11 250);
+  --color-blue-400: oklch(0.72 0.13 250);
+  --color-blue-500: oklch(0.68 0.14 250);
+  --color-blue-600: var(--primary);
+  --color-blue-700: oklch(0.56 0.14 250);
+  --color-blue-950: oklch(0.16 0.06 250);
+
+  /* secondary brand = amber signal */
+  --color-accent: var(--accent);
+  --color-purple-300: oklch(0.8 0.12 78);
+  --color-purple-400: var(--accent);
+  --color-purple-500: oklch(0.66 0.16 78);
+  --color-purple-600: oklch(0.6 0.15 78);
+  --color-purple-950: oklch(0.18 0.05 78);
+
+  --color-cyan-400: oklch(0.74 0.11 210); /* informational links */
+  --color-emerald-400: var(--ok);
+  --color-emerald-950: oklch(0.16 0.06 150);
+  --color-rose-400: var(--err);
+  --color-rose-500: oklch(0.6 0.19 25);
+  --color-amber-300: oklch(0.8 0.12 78);
+  --color-amber-400: var(--accent);
+  --color-amber-500: oklch(0.7 0.15 78);
+
+  --color-background: var(--bg);
+  --color-foreground: var(--ink);
+
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
   --font-itim: var(--font-itim), cursive;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-itim), var(--font-geist-sans), Arial, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01";
 }
 
+/* Itim reserved for subtitle text ONLY (editor + overlay + preview) */
+.font-subtitle {
+  font-family: var(--font-itim), cursive, sans-serif;
+}
+
+/* Inherited utility-inert placeholder — font-itim stays a safe fallback alias */
 .font-itim {
   font-family: var(--font-itim), cursive, sans-serif;
+}
+
+/* Tournament-quality canned gradient kill: never render one */
+.bg-gradient-to-r,
+.bg-gradient-to-br,
+.bg-gradient-to-t,
+.bg-gradient-to-b {
+  background-image: none !important;
+}
+
+/* Custom scrollbar (editor / timeline) */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-pill);
+}
+
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+.animate-spin-slow {
+  animation: spin-slow 2s linear infinite;
 }

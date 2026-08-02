@@ -16,6 +16,7 @@ interface ExportModalProps {
   subtitles: SubtitleItem[];
   videoUrl: string | null;
   selectedFile?: File | null;
+  notify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -24,6 +25,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   subtitles,
   videoUrl,
   selectedFile,
+  notify,
 }) => {
   const [isFFmpegExporting, setIsFFmpegExporting] = useState(false);
   const [ffmpegStatus, setFfmpegStatus] = useState('');
@@ -44,6 +46,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     link.download = 'subtitles.srt';
     link.click();
     URL.revokeObjectURL(url);
+    notify?.(`Downloaded ${subtitles.length} cues (.srt)`, 'success');
   };
 
   const handleDownloadVTT = () => {
@@ -55,6 +58,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     link.download = 'subtitles.vtt';
     link.click();
     URL.revokeObjectURL(url);
+    notify?.(`Downloaded ${subtitles.length} cues (.vtt)`, 'success');
   };
 
   const handleCancelExport = () => {};
@@ -66,6 +70,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
     setIsFFmpegExporting(true);
     setFfmpegStatus('กำลังเตรียมข้อมูลคำบรรยาย...');
+    notify?.('Starting hardsub video export…', 'info');
 
     try {
       const cleanSubtitles = sanitizeAndFixOverlaps(subtitles);
@@ -175,11 +180,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      notify?.(`Hardsub video ready for download`, 'success');
 
     } catch (err: unknown) {
       console.error(err);
       const errMessage = err instanceof Error ? err.message : String(err);
-      alert('FFmpeg Hardsub Export Error: ' + errMessage);
+      notify?.(`Hardsub export error: ${errMessage}`, 'error');
     } finally {
       setIsFFmpegExporting(false);
       setFfmpegStatus('');
@@ -295,7 +301,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <button
               disabled={(!videoUrl && !selectedFile) || isFFmpegExporting}
               onClick={handleFFmpegExportHardsub}
-              className="w-full flex items-center justify-between p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/80 to-teal-950/80 border border-emerald-500/40 hover:border-emerald-400 hover:bg-emerald-950/90 transition-all text-left group disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-950/30"
+              className="w-full flex items-center justify-between p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 hover:border-emerald-400 hover:bg-emerald-950/90 transition-colors text-left group disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <div className="flex items-center gap-3">
                 <div className="p-2.5 rounded-lg bg-emerald-500/20 text-emerald-400 group-hover:scale-110 transition-transform">

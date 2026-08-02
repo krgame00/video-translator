@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { MODELS, parsePartialOrTruncatedJSON, requestJSON, Type } from './geminiClient';
 import { SubtitleItem } from './types';
-import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from './srtFormatter';
+import { parseTimestampToSeconds, sanitizeAndFixOverlaps, clampSubtitlesToDuration } from './srtFormatter';
 import { env } from './env';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -42,6 +42,10 @@ export async function processVideoSubtitlesFromStream(
     if (value) writeStream.write(value);
   }
   await new Promise((resolve) => writeStream.end(resolve));
+
+  // Real media duration (seconds) parsed from the streamed temp file when possible.
+  // Used to (a) anchor the model's timeline and (b) clamp away over-length hallucinations.
+  const audioDuration = wavDurationSeconds(tempFilePath);
 
   let lastError: unknown = null;
 
@@ -99,6 +103,7 @@ CRITICAL LANGUAGE REQUIREMENT (MUST FOLLOW):
 
 CRITICAL REQUIREMENTS FOR TIMESTAMP ACCURACY & FULL DURATION COVERAGE:
 1. Cover the ENTIRE audio/video file duration from 00:00:00.000 to the end of the video (even if 20+ minutes long). Do NOT stop early or truncate timeline.
+${audioDuration > 0 ? `REAL MEDIA DURATION IS ${audioDuration.toFixed(3)} SECONDS. This is the true length of the audio. The final cue's endTime MUST be <= ${formatDur(audioDuration)}. NEVER invent timestamps past this instant. Keep each cue's start and end proportional to the actual speech you hear, NOT fabricated to fill arbitrary gaps.\n` : ''}
 2. Format startTime and endTime as standard time string in "HH:MM:SS.mmm" format (e.g. "00:01:23.500" for 1 min 23.5s, "00:15:04.200" for 15 min 4.2s, "00:20:04.000" for 20 min 4s).
 3. Do NOT output raw floating point numbers or MM.SS decimal formats for timestamps. Always use "HH:MM:SS.mmm".
 
@@ -171,7 +176,92 @@ CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
             })
             .filter((item) => item.translatedText.length > 0);
 
-          let subtitles = sanitizeAndFixOverlaps(rawParsed);
+          let subtitles = audioDuration > 0
+            ? clampSubtitlesToDuration(rawParsed, audioDuration)
+            : sanitizeAndFixOverlaps(rawParsed);
+
+          // Hallucination recovery: retry ONCE if the model's raw timeline is
+          // wildly out of bounds (over/under coverage) or returned nothing.
+          // The raw (unclamped) extents decide this, because clamping already
+          // hides over-length timelines behind a clean cut.
+          if (audioDuration > 0 && rawParsed.length > 0) {
+            const rawMaxEnd = Math.max(...rawParsed.map((s) => s.endTime));
+            const rawMinStart = Math.min(...rawParsed.map((s) => s.startTime));
+            const rawCover = rawMaxEnd - rawMinStart;
+            const over = rawMaxEnd > audioDuration * 1.6;
+            const under = rawCover < audioDuration * 0.3;
+            if (over || under) {
+              console.warn(
+                `[Timing Guard] Model timeline out of range (rawCover=${rawCover.toFixed(1)}s, audio=${audioDuration.toFixed(1)}s). Retrying once...`
+              );
+              try {
+                const retryPrompt = `Re-transcribe and re-translate the speech in this audio file, but ONLY its true timestamps matter.
+REAL AUDIO DURATION IS EXACTLY ${audioDuration.toFixed(3)} SECONDS. Every cue MUST lie strictly inside [0, ${audioDuration.toFixed(3)}]. The first cue starts at 00:00:00.000, the last cue ends no later than ${formatDur(audioDuration)}.
+Assign each cue's start/end to the exact moment the words are actually spoken — do NOT stretch cues, do NOT invent long silent gaps, and do NOT output any timestamp past the real duration. Each cue is 2-7 seconds. Skip regions with no speech.
+TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output valid JSON array with id, startTime, endTime (HH:MM:SS.mmm), originalText, translatedText.`;
+
+                const retryRes = await ai.models.generateContent({
+                  model: modelName,
+                  contents: [
+                    {
+                      fileData: {
+                        fileUri: uploadedFile.uri,
+                        mimeType: uploadedFile.mimeType || mimeType,
+                      },
+                    },
+                    retryPrompt,
+                  ],
+                  config: {
+                    maxOutputTokens: 65536,
+                    responseMimeType: 'application/json',
+                    abortSignal: signal,
+                    responseSchema: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          id: { type: Type.STRING },
+                          startTime: { type: Type.STRING },
+                          endTime: { type: Type.STRING },
+                          originalText: { type: Type.STRING },
+                          translatedText: { type: Type.STRING },
+                        },
+                        required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
+                      },
+                    },
+                  },
+                });
+
+                const retryText = retryRes.text;
+                if (retryText) {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const retryRaw: any[] = parsePartialOrTruncatedJSON(retryText);
+                  if (Array.isArray(retryRaw) && retryRaw.length > 0) {
+                    const retryParsed: SubtitleItem[] = retryRaw
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      .map((item: any, idx: number) => {
+                        const startSec = parseTimestampToSeconds(item.startTime);
+                        const endSec = parseTimestampToSeconds(item.endTime);
+                        const validEnd = endSec > startSec ? endSec : startSec + 2.0;
+                        return {
+                          id: item.id || String(idx + 1),
+                          startTime: Math.max(0, Number(startSec.toFixed(3))),
+                          endTime: Math.max(0, Number(validEnd.toFixed(3))),
+                          originalText: String(item.originalText || '').trim(),
+                          translatedText: String(item.translatedText || item.text || '').trim(),
+                        };
+                      })
+                      .filter((item: SubtitleItem) => item.translatedText.length > 0);
+                    if (retryParsed.length > 0) {
+                      subtitles = clampSubtitlesToDuration(retryParsed, audioDuration);
+                    }
+                  }
+                }
+              } catch (retryErr) {
+                console.warn('[Timing Guard] Retry failed, keeping first result:', retryErr);
+              }
+            }
+          }
 
           // Post-processing fallback: If target is Thai but translatedText is missing Thai characters, translate directly
           if (targetLanguage === 'th') {
@@ -207,7 +297,9 @@ ${JSON.stringify(subtitles, null, 2)}`;
                 });
 
                 if (Array.isArray(fixed) && fixed.length > 0) {
-                  subtitles = sanitizeAndFixOverlaps(fixed);
+                  subtitles = audioDuration > 0
+                    ? clampSubtitlesToDuration(fixed, audioDuration)
+                    : sanitizeAndFixOverlaps(fixed);
                 }
               } catch (transErr) {
                 console.warn('[Language Guard] Fallback translation warning:', transErr);
@@ -265,4 +357,44 @@ export async function processVideoSubtitles(
     },
   });
   return processVideoSubtitlesFromStream(stream, mimeType, fileName, targetLanguage);
+}
+
+/**
+ * Read the real duration (seconds) of a 16-bit PCM WAV file from its RIFF header.
+ * The extraction pipeline always emits WAV, so this gives an authoritative media length
+ * used to anchor and clamp model timestamps. Returns null on any parse failure
+ * (e.g. a non-WAV fallback payload) so the pipeline degrades gracefully.
+ */
+function wavDurationSeconds(filePath: string): number {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const head = Buffer.alloc(44);
+    const read = fs.readSync(fd, head, 0, 44, 0);
+    fs.closeSync(fd);
+    if (read < 44) return 0;
+    if (head.toString('latin1', 0, 4) !== 'RIFF') return 0;
+    if (head.toString('latin1', 8, 12) !== 'WAVE') return 0;
+
+    // Offset 28-31 = byte rate; offset 36-39 = "data"; offset 40-43 = data chunk size
+    if (head.toString('latin1', 36, 40) !== 'data') return 0;
+    const byteRate = head.readUInt32LE(28);
+    const dataSize = head.readUInt32LE(40);
+    if (!byteRate || !dataSize) return 0;
+    return dataSize / byteRate;
+  } catch {
+    return 0;
+  }
+}
+
+/** Format a duration in seconds as "HH:MM:SS.mmm" for prompt anchoring. */
+function formatDur(secs: number): string {
+  const s = Math.max(0, secs);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const [int, frac = '000'] = sec.toFixed(3).split('.');
+  const mm = String(m).padStart(2, '0');
+  const hh = String(h).padStart(2, '0');
+  const ss = String(int).padStart(2, '0');
+  return `${hh}:${mm}:${ss}.${frac}`;
 }

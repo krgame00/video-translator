@@ -147,6 +147,38 @@ export function splitLongSubtitleItem(item: SubtitleItem): SubtitleItem[] {
 }
 
 /**
+ * Clamp all subtitle cues to a known media duration (seconds).
+ * - Any cue fully beyond the media end is dropped (model hallucination).
+ * - Cues straddling the end are trimmed to exactly endTime = maxDuration.
+ * - Then overlap-sane again so ordering/IDs stay valid.
+ */
+export function clampSubtitlesToDuration(
+  items: SubtitleItem[],
+  maxDuration: number
+): SubtitleItem[] {
+  if (!items || items.length === 0) return [];
+  if (!Number.isFinite(maxDuration) || maxDuration <= 0) return items;
+
+  const dur = Number(maxDuration.toFixed(3));
+  const valid = items
+    .map((item, idx) => {
+      const start = Math.max(0, Number(item.startTime) || 0);
+      const end = Number(item.endTime) || start;
+      if (start >= dur) return null; // entire cue sits past the media end -> hallucination
+      const clampedEnd = Math.min(dur, Math.max(start + 0.1, end));
+      return {
+        ...item,
+        id: item.id || `sub_${idx + 1}`,
+        startTime: Number(start.toFixed(3)),
+        endTime: Number(clampedEnd.toFixed(3)),
+      };
+    })
+    .filter((item): item is SubtitleItem => item !== null);
+
+  return sanitizeAndFixOverlaps(valid);
+}
+
+/**
  * Sanitize and fix overlapping subtitle time ranges so that no two subtitle items render simultaneously
  */
 export function sanitizeAndFixOverlaps(items: SubtitleItem[]): SubtitleItem[] {
