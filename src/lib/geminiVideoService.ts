@@ -7,6 +7,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+// Type-safe interfaces for Gemini API responses
+interface GeminiRawSubtitleItem {
+  id: string;
+  startTime: string;
+  endTime: string;
+  originalText: string;
+  translatedText: string;
+  text?: string; // fallback field sometimes returned by model
+}
+
 function getTempDirectory(): string {
   const custom = env.tempDir || process.env.TEMP || process.env.TMP;
   if (custom && fs.existsSync(custom)) {
@@ -152,16 +162,14 @@ CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
             throw new Error('Gemini API returned an empty response.');
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const rawSubtitles: any[] = parsePartialOrTruncatedJSON(responseText);
+          const rawSubtitles: GeminiRawSubtitleItem[] = parsePartialOrTruncatedJSON(responseText);
           if (!rawSubtitles || !Array.isArray(rawSubtitles)) {
             throw new Error('Could not parse subtitles from Gemini API response.');
           }
 
           // Convert formatted timestamp strings (or numbers) into clean seconds and remove overlaps
           const rawParsed: SubtitleItem[] = rawSubtitles
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            .map((item: any, idx: number) => {
+            .map((item: GeminiRawSubtitleItem, idx: number) => {
               const startSec = parseTimestampToSeconds(item.startTime);
               const endSec = parseTimestampToSeconds(item.endTime);
               const validEnd = endSec > startSec ? endSec : startSec + 2.0;
@@ -234,12 +242,10 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
 
                 const retryText = retryRes.text;
                 if (retryText) {
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const retryRaw: any[] = parsePartialOrTruncatedJSON(retryText);
+                  const retryRaw: GeminiRawSubtitleItem[] = parsePartialOrTruncatedJSON(retryText);
                   if (Array.isArray(retryRaw) && retryRaw.length > 0) {
                     const retryParsed: SubtitleItem[] = retryRaw
-                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                      .map((item: any, idx: number) => {
+                      .map((item: GeminiRawSubtitleItem, idx: number) => {
                         const startSec = parseTimestampToSeconds(item.startTime);
                         const endSec = parseTimestampToSeconds(item.endTime);
                         const validEnd = endSec > startSec ? endSec : startSec + 2.0;
