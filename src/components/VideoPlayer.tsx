@@ -2,6 +2,7 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { SubtitleItem } from '@/lib/types';
+import { findActiveSubtitle } from '@/lib/subtitleUtils';
 import { Settings, Type } from 'lucide-react';
 
 interface VideoPlayerProps {
@@ -21,12 +22,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [showSettings, setShowSettings] = useState<boolean>(false);
+  // Intrinsic aspect (w/h) of the loaded media — portrait videos get a tall
+  // frame instead of being letterboxed into a 16:9 sliver.
+  const [videoAspect, setVideoAspect] = useState<number | null>(null);
 
   // Styling Customizer States
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg' | 'xl'>('lg');
   const [textColor, setTextColor] = useState<string>('#FFFFFF');
   const [position, setPosition] = useState<'bottom' | 'top'>('bottom');
-  const [bgStyle] = useState<'glass' | 'dark' | 'none'>('none');
 
   // Synchronize seek requests from parent/SubtitleEditor
   useEffect(() => {
@@ -35,11 +38,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [seekTime]);
 
-  // Keyboard shortcuts (Space = play/pause, Left = -5s, Right = +5s)
+  // Reset aspect when the media changes (adjust-state-during-render
+  // pattern — cheaper and lint-clean versus a syncing effect)
+  const [prevUrl, setPrevUrl] = useState<string | null>(videoUrl);
+  if (prevUrl !== videoUrl) {
+    setPrevUrl(videoUrl);
+    setVideoAspect(null);
+  }
+
+  // Keyboard shortcuts (Space = play/pause, Left = -5s, Right = +5s).
+  // This component is the SINGLE owner of these keys — the page-level handler
+  // intentionally does not bind them, so seeks can never double-fire.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'BUTTON' ||
+          target.tagName === 'SELECT' ||
+          target.tagName === 'SUMMARY' ||
+          target.tagName === 'A' ||
+          target.isContentEditable)
+      ) {
+        // Never hijack keys while a form control or actionable element has
+        // focus — Space must activate buttons, not toggle playback.
         return;
       }
 
@@ -65,10 +89,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Find currently active subtitle
-  const activeSubtitle = subtitles.find(
-    (item) => currentTime >= item.startTime && currentTime <= item.endTime
-  );
+  // Find currently active subtitle (binary search; list is sorted by time)
+  const activeSubtitle = findActiveSubtitle(subtitles, currentTime);
 
   // Dynamic CSS classes for subtitle overlay based on settings
   const fontClasses = {
@@ -80,20 +102,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const posClass = position === 'top' ? 'top-12' : 'bottom-12';
 
-  const bgClasses = {
-    glass: 'bg-black/75 backdrop-blur-md border border-white/10 shadow-2xl',
-    dark: 'bg-black border border-black shadow-2xl',
-    none: 'drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]',
-  }[bgStyle];
-
   return (
-    <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group flex items-center justify-center">
+    <div
+      className="relative w-full aspect-video max-h-[70svh] bg-black rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group flex items-center justify-center"
+      style={videoAspect ? { aspectRatio: String(videoAspect) } : undefined}
+    >
       {videoUrl ? (
         <>
           <video
             ref={videoRef}
             src={videoUrl}
             controls
+            playsInline
+            onLoadedMetadata={(e) => {
+              const w = e.currentTarget.videoWidth;
+              const h = e.currentTarget.videoHeight;
+              if (w && h) setVideoAspect(w / h);
+            }}
             onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
             className="w-full h-full object-contain"
           />
@@ -178,7 +203,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <div className={`absolute ${posClass} left-0 right-0 px-6 text-center pointer-events-none z-10 transition-all duration-150`}>
               <span
                 style={{ color: textColor }}
-                className={`inline-block px-4 py-2 rounded-xl ${bgClasses} ${fontClasses} tracking-wide leading-relaxed font-itim`}
+                className={`inline-block px-4 py-2 rounded-xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] ${fontClasses} tracking-wide leading-relaxed font-itim`}
               >
                 {activeSubtitle.translatedText}
               </span>

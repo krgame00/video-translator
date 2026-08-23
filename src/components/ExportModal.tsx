@@ -1,14 +1,16 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SubtitleItem } from '@/lib/types';
 import { generateSRT, generateVTT, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
 import { uploadFileInChunks } from '@/lib/chunkedUploader';
-import { Download, FileText, X, Loader2, Clock, Zap } from 'lucide-react';
+import { Download, FileText, X, Loader2, Clock, Zap, XCircle } from 'lucide-react';
 
 // Files above this size use chunked upload instead of a single-stream fetch
 // (avoids proxy payload limits / client memory pressure on very large videos).
 const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024;
+// Give up polling after 20 minutes so a lost job cannot poll forever.
+const POLL_TIMEOUT_MS = 20 * 60 * 1000;
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -16,6 +18,8 @@ interface ExportModalProps {
   subtitles: SubtitleItem[];
   videoUrl: string | null;
   selectedFile?: File | null;
+  /** Media duration in seconds; enables real server-side encode progress. */
+  duration?: number;
   notify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
@@ -25,6 +29,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   subtitles,
   videoUrl,
   selectedFile,
+  duration,
   notify,
 }) => {
   const [isFFmpegExporting, setIsFFmpegExporting] = useState(false);
@@ -34,6 +39,61 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [fontSize, setFontSize] = useState(22);
   const [primaryColor, setPrimaryColor] = useState('FFFFFF');
   const [borderStyle, setBorderStyle] = useState(1); // 1 = Outline Only
+
+  // Polling lifecycle refs (interval, hard timeout, active job id, and a
+  // resolver that lets Cancel settle the in-flight polling promise cleanly).
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
+  const cancelPollResolveRef = useRef<(() => void) | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }, []);
+
+  /** Best-effort server-side cancel: kills the FFmpeg process and cleans temp files. */
+  const cancelServerJob = useCallback(() => {
+    const jobId = activeJobIdRef.current;
+    activeJobIdRef.current = null;
+    if (jobId) {
+      fetch(`/api/export-hardsub?action=cancel&jobId=${jobId}`, { method: 'POST' }).catch(() => {});
+    }
+  }, []);
+
+  const handleCancelExport = useCallback(() => {
+    if (!isFFmpegExporting) return;
+    stopPolling();
+    cancelServerJob();
+    cancelPollResolveRef.current?.();
+    cancelPollResolveRef.current = null;
+    setIsFFmpegExporting(false);
+    setFfmpegStatus('');
+    notify?.('ยกเลิกการ export แล้ว (hardsub export cancelled)', 'info');
+  }, [isFFmpegExporting, stopPolling, cancelServerJob, notify]);
+
+  // Leaving/unmounting the page mid-export must not leak the poll loop.
+  useEffect(() => {
+    return () => {
+      stopPolling();
+      cancelServerJob();
+      cancelPollResolveRef.current?.();
+      cancelPollResolveRef.current = null;
+    };
+  }, [stopPolling, cancelServerJob]);
+
+  const handleClose = useCallback(() => {
+    if (isFFmpegExporting) {
+      handleCancelExport();
+    }
+    onClose();
+  }, [isFFmpegExporting, handleCancelExport, onClose]);
 
   if (!isOpen) return null;
 
@@ -61,10 +121,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     notify?.(`Downloaded ${subtitles.length} cues (.vtt)`, 'success');
   };
 
-  const handleCancelExport = () => {};
-
-  // 🚀 FFmpeg Server-Side High-Speed Hardsub Export (5x - 10x Speed, Perfect Audio Sync)
-  // 🚀 FFmpeg Server-Side High-Speed Hardsub Export (GPU Accelerated + Async Polling)
+  // FFmpeg server-side hardsub export: prepare job → upload video → poll
+  // status → download. Cancellable and bounded by POLL_TIMEOUT_MS.
   const handleFFmpegExportHardsub = async () => {
     if (!selectedFile && !videoUrl) return;
 
@@ -79,8 +137,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       const prepRes = await fetch('/api/export-hardsub?action=prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           subtitles: cleanSubtitles,
+          duration,
           style: {
             fontSize,
             primaryColor,
@@ -96,6 +155,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       }
 
       const jobId = prepData.jobId;
+      activeJobIdRef.current = jobId;
       setFfmpegStatus('กำลังส่งไฟล์วิดีโอเข้าสู่ FFmpeg Engine...');
 
       let fileToSend: Blob;
@@ -143,11 +203,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         }
       }
 
-      setFfmpegStatus('กำลังประมวลผลด้วย FFmpeg GPU Hardware Acceleration (NVENC)...');
+      setFfmpegStatus('กำลังเข้ารหัสวิดีโอด้วย FFmpeg (Server-Side)...');
 
-      // 3. Poll job status every 1.5s until complete (0% risk of browser fetch timeout)
+      // 3. Poll job status every 1.5s until complete, with a hard timeout.
+      //    Cancel resolves the promise so the async flow ends cleanly.
+      let wasCancelled = false;
       await new Promise<void>((resolve, reject) => {
-        const interval = setInterval(async () => {
+        cancelPollResolveRef.current = () => {
+          wasCancelled = true;
+          resolve();
+        };
+
+        pollIntervalRef.current = setInterval(async () => {
           try {
             const statusRes = await fetch(`/api/export-hardsub?action=status&jobId=${jobId}`);
             if (!statusRes.ok) return;
@@ -156,19 +223,26 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             if (!statusData.success) return;
 
             if (statusData.status === 'encoding') {
-              setFfmpegStatus(`กำลังประมวลผลด้วย FFmpeg GPU Hardware... (${statusData.progress || 30}%)`);
+              setFfmpegStatus(`กำลังเข้ารหัสด้วย FFmpeg... (${statusData.progress ?? 30}%)`);
             } else if (statusData.status === 'completed') {
-              clearInterval(interval);
+              stopPolling();
               resolve();
-            } else if (statusData.status === 'failed') {
-              clearInterval(interval);
+            } else if (statusData.status === 'failed' || statusData.status === 'cancelled') {
+              stopPolling();
               reject(new Error(statusData.error || 'FFmpeg encoding failed.'));
             }
           } catch (pollErr) {
             console.warn('Status poll warning:', pollErr);
           }
         }, 1500);
+
+        pollTimeoutRef.current = setTimeout(() => {
+          stopPolling();
+          reject(new Error('หมดเวลารอผลการเข้ารหัส (20 นาที) — โปรดลองอีกครั้ง'));
+        }, POLL_TIMEOUT_MS);
       });
+
+      if (wasCancelled) return;
 
       setFfmpegStatus('ประมวลผลเสร็จสิ้น! กำลังเริ่มดาวน์โหลด...');
 
@@ -187,24 +261,25 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       const errMessage = err instanceof Error ? err.message : String(err);
       notify?.(`Hardsub export error: ${errMessage}`, 'error');
     } finally {
+      stopPolling();
+      activeJobIdRef.current = null;
+      cancelPollResolveRef.current = null;
       setIsFFmpegExporting(false);
       setFfmpegStatus('');
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#050507]/80 backdrop-blur-md animate-fade-in">
-      <div className="w-full max-w-md bg-[#0f0f14] border border-[#232334] rounded-2xl p-6 shadow-2xl space-y-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#050507]/80 backdrop-blur-md animate-fade-in" role="dialog" aria-modal="true" aria-label="Export subtitles">
+      <div className="w-full max-w-md max-h-[88svh] overflow-y-auto custom-scrollbar bg-[#0f0f14] border border-[#232334] rounded-2xl p-4 sm:p-6 shadow-2xl space-y-6">
         <div className="flex items-center justify-between border-b border-[#232334] pb-4">
           <h3 className="text-base font-bold text-zinc-100 flex items-center gap-2">
             <Download className="w-5 h-5 text-cyan-400" />
             <span>Export Subtitles</span>
           </h3>
           <button
-            onClick={() => {
-              handleCancelExport();
-              onClose();
-            }}
+            onClick={handleClose}
+            aria-label="Close export dialog"
             className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-[#161620] transition-colors"
           >
             <X className="w-5 h-5" />
@@ -296,7 +371,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
           </div>
 
-          {/* ⭐ FFmpeg High-Speed Hardsub Video Option */}
+          {/* FFmpeg Server-Side Hardsub Video Option */}
           <div className="space-y-2">
             <button
               disabled={(!videoUrl && !selectedFile) || isFFmpegExporting}
@@ -315,11 +390,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <p className="text-sm font-bold text-emerald-300 flex items-center gap-1.5">
                     Hardsub Video (.mp4)
                     <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                      ⚡ 5x-10x Fast
+                      ⚡ Fast Encode
                     </span>
                   </p>
                   <p className="text-xs text-zinc-400">
-                    {isFFmpegExporting ? 'FFmpeg Processing...' : 'FFmpeg Server-Side Encoding (1-2 mins)'}
+                    {isFFmpegExporting ? 'FFmpeg Processing...' : 'FFmpeg Server-Side Encoding (CPU x264 ultrafast)'}
                   </p>
                 </div>
               </div>
@@ -328,9 +403,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             {isFFmpegExporting && (
               <div className="p-3 rounded-xl bg-[#050507] border border-emerald-500/40 space-y-2 text-xs">
-                <div className="flex items-center gap-2 text-emerald-400 font-medium animate-pulse">
-                  <Clock className="w-4 h-4 animate-spin" />
-                  <span>{ffmpegStatus}</span>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-emerald-400 font-medium animate-pulse min-w-0">
+                    <Clock className="w-4 h-4 shrink-0" />
+                    <span className="truncate">{ffmpegStatus}</span>
+                  </div>
+                  <button
+                    onClick={handleCancelExport}
+                    className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-medium flex items-center gap-1 shrink-0 transition-colors"
+                  >
+                    <XCircle className="w-3.5 h-3.5" /> ยกเลิก
+                  </button>
                 </div>
               </div>
             )}

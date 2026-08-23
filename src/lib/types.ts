@@ -6,12 +6,6 @@ export interface SubtitleItem {
   translatedText: string; // Translated text (Thai)
 }
 
-export interface VideoTranslationResponse {
-  success: boolean;
-  subtitles?: SubtitleItem[];
-  error?: string;
-}
-
 export interface SubtitleStyle {
   fontName?: string;
   fontSize?: number;
@@ -24,7 +18,7 @@ export interface SubtitleStyle {
 
 export interface ExportJob {
   id: string;
-  status: 'uploading' | 'encoding' | 'completed' | 'failed';
+  status: 'uploading' | 'encoding' | 'completed' | 'failed' | 'cancelled';
   progress: number;
   error?: string;
   inPath: string;
@@ -32,34 +26,6 @@ export interface ExportJob {
   outPath: string;
   createdAt: number;
   style?: SubtitleStyle;
-}
-
-export interface AudioChunk {
-  index: number;
-  buffer: Buffer;
-  startTime: number;
-  endTime: number;
-}
-
-export interface HardsubPrepareResponse {
-  success: boolean;
-  jobId?: string;
-  error?: string;
-}
-
-export interface HardsubStatusResponse {
-  success: boolean;
-  status?: ExportJob['status'];
-  progress?: number;
-  error?: string;
-}
-
-export interface RefineSubtitlesRequest {
-  subtitles: SubtitleItem[];
-  targetLanguage?: string;
-}
-
-export interface TranslateSRTRequest {
-  srtContent: string;
-  targetLanguage?: string;
+  /** Media duration in seconds (optional, enables real encode progress). */
+  duration?: number;
 }

@@ -1,20 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processVideoSubtitlesFromStream } from '@/lib/geminiVideoService';
 import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
-import { assertContentLength, HttpError } from '@/lib/security';
+import { assertContentLength, HttpError, createRateLimiter, getClientIp } from '@/lib/security';
+
+// The client fires chunks in parallel batches of 3 — allow comfortable headroom.
+const chunkLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
 export const maxDuration = 300; // 5 minutes per chunk request
 
 export async function POST(req: NextRequest) {
   triggerBackgroundTempCleanup();
   try {
+    chunkLimiter(getClientIp(req));
     assertContentLength(req);
 
-    const formData = await req.formData();
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch {
+      throw new HttpError(400, 'Request body must be multipart/form-data with a "file" field.');
+    }
     const file = formData.get('file') as File | null;
     const targetLanguage = (formData.get('targetLanguage') as string) || 'th';
     const chunkIndex = parseInt((formData.get('chunkIndex') as string) || '0', 10);
     const chunkStartTime = parseFloat((formData.get('chunkStartTime') as string) || '0');
+
+    if (!Number.isFinite(chunkIndex) || !Number.isFinite(chunkStartTime)) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid chunkIndex or chunkStartTime.' },
+        { status: 400 }
+      );
+    }
 
     if (!file) {
       return NextResponse.json(

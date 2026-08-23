@@ -3,9 +3,11 @@ import { MODELS, parsePartialOrTruncatedJSON, requestJSON, Type } from './gemini
 import { SubtitleItem } from './types';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps, clampSubtitlesToDuration } from './srtFormatter';
 import { env } from './env';
+import { getTempRoot, MAX_UPLOAD_BYTES } from './security';
+import { pumpToWriteStream } from './streamPump';
+import { hasThaiChars } from './languageCheck';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 
 // Type-safe interfaces for Gemini API responses
 interface GeminiRawSubtitleItem {
@@ -15,14 +17,6 @@ interface GeminiRawSubtitleItem {
   originalText: string;
   translatedText: string;
   text?: string; // fallback field sometimes returned by model
-}
-
-function getTempDirectory(): string {
-  const custom = env.tempDir || process.env.TEMP || process.env.TMP;
-  if (custom && fs.existsSync(custom)) {
-    return custom;
-  }
-  return os.tmpdir();
 }
 
 export async function processVideoSubtitlesFromStream(
@@ -40,18 +34,23 @@ export async function processVideoSubtitlesFromStream(
   // 1. Sanitize file name to ASCII-only
   const ext = path.extname(fileName) || '.mp4';
   const safeFileName = `video_sub_${Date.now()}${ext}`;
-  const tempDir = getTempDirectory();
+  const tempDir = getTempRoot();
   const tempFilePath = path.join(tempDir, safeFileName);
 
-  // Stream file chunks directly to disk (RAM usage stays < 5MB regardless of file size)
+  // Stream file chunks directly to disk with a hard byte cap (guards against
+  // chunked-transfer bodies that arrive without a content-length header) and
+  // write-error handling (ENOSPC rejects instead of crashing the process).
   const writeStream = fs.createWriteStream(tempFilePath);
   const reader = stream.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) writeStream.write(value);
+  try {
+    await pumpToWriteStream(reader, writeStream, MAX_UPLOAD_BYTES);
+  } catch (pumpErr) {
+    writeStream.destroy();
+    if (fs.existsSync(tempFilePath)) {
+      try { fs.unlinkSync(tempFilePath); } catch {}
+    }
+    throw pumpErr;
   }
-  await new Promise((resolve) => writeStream.end(resolve));
 
   // Real media duration (seconds) parsed from the streamed temp file when possible.
   // Used to (a) anchor the model's timeline and (b) clamp away over-length hallucinations.
@@ -81,9 +80,14 @@ export async function processVideoSubtitlesFromStream(
 
           const fileNameOnGemini = uploadedFile.name;
 
-          // Wait for file processing if needed
+          // Wait for file processing if needed (bounded to 5 minutes so a
+          // stuck Gemini-side state cannot hang the request forever)
+          const processingDeadline = Date.now() + 5 * 60 * 1000;
           let fileState = await ai.files.get({ name: fileNameOnGemini });
           while (fileState.state === 'PROCESSING') {
+            if (Date.now() > processingDeadline) {
+              throw new Error('Gemini file processing timed out after 5 minutes.');
+            }
             await new Promise((resolve) => setTimeout(resolve, 1000));
             fileState = await ai.files.get({ name: fileNameOnGemini });
           }
@@ -162,7 +166,7 @@ CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
             throw new Error('Gemini API returned an empty response.');
           }
 
-          const rawSubtitles: GeminiRawSubtitleItem[] = parsePartialOrTruncatedJSON(responseText);
+          const rawSubtitles = parsePartialOrTruncatedJSON(responseText) as GeminiRawSubtitleItem[] | null;
           if (!rawSubtitles || !Array.isArray(rawSubtitles)) {
             throw new Error('Could not parse subtitles from Gemini API response.');
           }
@@ -242,7 +246,7 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
 
                 const retryText = retryRes.text;
                 if (retryText) {
-                  const retryRaw: GeminiRawSubtitleItem[] = parsePartialOrTruncatedJSON(retryText);
+                  const retryRaw = parsePartialOrTruncatedJSON(retryText) as GeminiRawSubtitleItem[] | null;
                   if (Array.isArray(retryRaw) && retryRaw.length > 0) {
                     const retryParsed: SubtitleItem[] = retryRaw
                       .map((item: GeminiRawSubtitleItem, idx: number) => {
@@ -272,7 +276,7 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
           // Post-processing fallback: If target is Thai but translatedText is missing Thai characters, translate directly
           if (targetLanguage === 'th') {
             const needsThaiTranslation = subtitles.some(
-              (item) => item.translatedText.length > 0 && !/[\u0E00-\u0E7F]/.test(item.translatedText)
+              (item) => item.translatedText.length > 0 && !hasThaiChars(item.translatedText)
             );
 
             if (needsThaiTranslation) {

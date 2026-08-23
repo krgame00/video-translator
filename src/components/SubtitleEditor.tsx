@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { SubtitleItem } from '@/lib/types';
 import { SubtitleItemCard } from './SubtitleItemCard';
 import { Plus, ArrowDownAZ, RefreshCw, Eye, EyeOff, Sparkles, Loader2, FileText, Languages, Search, Replace, X } from 'lucide-react';
 import { parseSRT } from '@/lib/srtFormatter';
-import { searchSubtitles, findAndReplaceSubtitles } from '@/lib/subtitleUtils';
+import { searchSubtitles, findAndReplaceSubtitles, findActiveSubtitle } from '@/lib/subtitleUtils';
 
 interface SubtitleEditorProps {
   subtitles: SubtitleItem[];
@@ -24,8 +25,10 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   targetLanguage = 'th',
   notify,
 }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const activeCardRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const subtitlesRef = useRef(subtitles);
+  useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
+
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [selectedStyle, setSelectedStyle] = useState<string>('anime');
   const [isRefining, setIsRefining] = useState<boolean>(false);
@@ -38,7 +41,14 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   const [replaceText, setReplaceText] = useState<string>('');
   const [matchCase, setMatchCase] = useState<boolean>(false);
 
-  const handleExecuteReplace = () => {
+  // Compute the filtered list ONCE per render (it was previously computed
+  // twice: once for the match counter, once for the list itself).
+  const filteredSubtitles = useMemo(
+    () => searchSubtitles(subtitles, searchQuery),
+    [subtitles, searchQuery]
+  );
+
+  const handleExecuteReplace = useCallback(() => {
     if (!findText) return;
     const count = subtitles.reduce(
       (n, s) => n + (s.translatedText.split(findText).length - 1),
@@ -49,11 +59,12 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
     notify?.(`Replaced ${count || 'all'} occurrence(s) of "${findText}"`, 'info');
     setFindText('');
     setReplaceText('');
-  };
+  }, [findText, replaceText, matchCase, subtitles, onSubtitlesChange, notify]);
 
-  const handleImportSRT = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportSRT = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (e.target instanceof HTMLInputElement) e.target.value = '';
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -69,9 +80,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       }
     };
     reader.readAsText(file, 'utf-8');
-  };
+  }, [onSubtitlesChange, notify]);
 
-  const handleTranslateSRT = async () => {
+  const handleTranslateSRT = useCallback(async () => {
     if (subtitles.length === 0) return;
     setIsTranslatingSRT(true);
     try {
@@ -85,16 +96,23 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         throw new Error(data.error || 'Failed to translate SRT subtitles.');
       }
       onSubtitlesChange(data.subtitles || []);
-      notify?.(`Translated ${(data.subtitles || []).length} cues`, 'success');
+      if (data.partial) {
+        notify?.(
+          `แปลสำเร็จบางส่วน (${(data.subtitles || []).length} cues) — ${data.failedBatches?.length ?? '?'} batch ล้มเหลว กดอีกครั้งเพื่อลองใหม่`,
+          'error'
+        );
+      } else {
+        notify?.(`Translated ${(data.subtitles || []).length} cues`, 'success');
+      }
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : String(err);
       notify?.(`SRT translation error: ${errMessage}`, 'error');
     } finally {
       setIsTranslatingSRT(false);
     }
-  };
+  }, [subtitles, targetLanguage, onSubtitlesChange, notify]);
 
-  const handleRefineSubtitles = async () => {
+  const handleRefineSubtitles = useCallback(async () => {
     if (subtitles.length === 0) return;
     setIsRefining(true);
     try {
@@ -108,46 +126,57 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         throw new Error(data.error || 'Failed to refine subtitles.');
       }
       onSubtitlesChange(data.subtitles || []);
-      notify?.(`Refined ${(data.subtitles || []).length} cues`, 'success');
+      if (data.partial) {
+        notify?.(
+          `ปรับสไตล์สำเร็จบางส่วน (${(data.subtitles || []).length} cues) — ${data.failedBatches?.length ?? '?'} batch ล้มเหลว กดอีกครั้งเพื่อลองใหม่`,
+          'error'
+        );
+      } else {
+        notify?.(`Refined ${(data.subtitles || []).length} cues`, 'success');
+      }
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : String(err);
       notify?.(`AI refinement error: ${errMessage}`, 'error');
     } finally {
       setIsRefining(false);
     }
-  };
+  }, [subtitles, selectedStyle, onSubtitlesChange, notify]);
 
-  // Find current active subtitle item
-  const activeSubtitle = subtitles.find(
-    (item) => currentTime >= item.startTime && currentTime <= item.endTime
+  // Find current active subtitle item (binary search; list is sorted by time)
+  const activeSubtitleId = useMemo(
+    () => findActiveSubtitle(subtitles, currentTime)?.id,
+    [subtitles, currentTime]
   );
-  const activeSubtitleId = activeSubtitle?.id;
 
-  // Auto-scroll ONLY when active subtitle item changes and autoScroll is enabled
+  // Auto-scroll ONLY when the active subtitle changes (search typing does not
+  // retrigger because the filtered index is read from a ref).
+  const filteredRef = useRef(filteredSubtitles);
+  useEffect(() => { filteredRef.current = filteredSubtitles; }, [filteredSubtitles]);
+
   useEffect(() => {
-    if (autoScroll && activeSubtitleId && activeCardRef.current) {
-      activeCardRef.current.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-      });
+    if (!autoScroll || !activeSubtitleId) return;
+    const idx = filteredRef.current.findIndex((item) => item.id === activeSubtitleId);
+    if (idx >= 0) {
+      virtuosoRef.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'smooth' });
     }
   }, [activeSubtitleId, autoScroll]);
 
-  const handleUpdate = (updatedItem: SubtitleItem) => {
-    const updated = subtitles.map((item) =>
+  // Stable handlers (via ref) so memoized cards do not re-render on every
+  // parent render during playback.
+  const handleUpdate = useCallback((updatedItem: SubtitleItem) => {
+    onSubtitlesChange(subtitlesRef.current.map((item) =>
       item.id === updatedItem.id ? updatedItem : item
-    );
-    onSubtitlesChange(updated);
-  };
+    ));
+  }, [onSubtitlesChange]);
 
-  const handleDelete = (id: string) => {
-    const updated = subtitles.filter((item) => item.id !== id);
-    onSubtitlesChange(updated);
-  };
+  const handleDelete = useCallback((id: string) => {
+    onSubtitlesChange(subtitlesRef.current.filter((item) => item.id !== id));
+  }, [onSubtitlesChange]);
 
-  const handleAddSubtitle = () => {
+  const handleAddSubtitle = useCallback(() => {
+    const current = subtitlesRef.current;
     const newId = `sub-${Date.now()}`;
-    const lastItem = subtitles[subtitles.length - 1];
+    const lastItem = current[current.length - 1];
     const startTime = lastItem ? lastItem.endTime + 0.1 : 0;
     const endTime = startTime + 2.0;
 
@@ -159,14 +188,14 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       translatedText: 'ข้อความซับไตเติลใหม่',
     };
 
-    onSubtitlesChange([...subtitles, newItem]);
+    onSubtitlesChange([...current, newItem]);
     notify?.(`Added subtitle at ${startTime.toFixed(1)}s`, 'info');
-  };
+  }, [onSubtitlesChange, notify]);
 
-  const handleSortByTime = () => {
-    const sorted = [...subtitles].sort((a, b) => a.startTime - b.startTime);
+  const handleSortByTime = useCallback(() => {
+    const sorted = [...subtitlesRef.current].sort((a, b) => a.startTime - b.startTime);
     onSubtitlesChange(sorted);
-  };
+  }, [onSubtitlesChange]);
 
   return (
     <div className="flex flex-col h-full bg-zinc-950/80 border border-zinc-800/80 rounded-2xl overflow-hidden backdrop-blur-xl">
@@ -182,10 +211,12 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
           <p className="text-xs text-zinc-500">Edit, add, or adjust timings</p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Phone: single horizontally-scrollable toolbar row (CapCut-style);
+            wraps naturally from sm: up. Children must not shrink. */}
+        <div className="flex flex-nowrap items-center gap-2 overflow-x-auto custom-scrollbar pb-1 -mx-1 px-1 sm:flex-wrap sm:overflow-visible sm:mx-0 sm:px-0 sm:pb-0">
           {/* AI Style Refinement Control */}
           {subtitles.length > 0 && (
-            <div className="flex items-center gap-1 bg-purple-950/40 border border-purple-500/30 p-1 rounded-xl">
+            <div className="flex items-center gap-1 bg-purple-950/40 border border-purple-500/30 p-1 rounded-xl shrink-0">
               <select
                 value={selectedStyle}
                 onChange={(e) => setSelectedStyle(e.target.value)}
@@ -216,10 +247,11 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
           {/* Auto-Scroll Toggle Button */}
           <button
             onClick={() => setAutoScroll(!autoScroll)}
-            className={`p-2 rounded-lg border text-xs flex items-center gap-1.5 transition-all ${
+            aria-pressed={autoScroll}
+            className={`p-2 rounded-lg border text-xs flex items-center gap-1.5 transition-all shrink-0 ${
               autoScroll
                 ? 'bg-blue-600/10 border-blue-500/40 text-blue-400'
-                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                : 'bg-zinc-900 border border-zinc-800 text-zinc-500 hover:text-zinc-300'
             }`}
             title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           >
@@ -238,7 +270,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
 
           <button
             onClick={handleSortByTime}
-            className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700 transition-all text-xs flex items-center gap-1.5"
+            className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700 transition-all text-xs flex items-center gap-1.5 shrink-0"
             title="Sort by timestamp"
           >
             <ArrowDownAZ className="w-3.5 h-3.5" />
@@ -250,7 +282,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
             <button
               disabled={isTranslatingSRT}
               onClick={handleTranslateSRT}
-              className="px-2.5 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 hover:bg-indigo-600/30 text-indigo-300 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50 transition-all"
+              className="px-2.5 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 hover:bg-indigo-600/30 text-indigo-300 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50 transition-all shrink-0"
               title="Translate existing SRT original text directly with Gemini AI"
             >
               {isTranslatingSRT ? (
@@ -266,10 +298,11 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
           {subtitles.length > 0 && (
             <button
               onClick={() => setShowFindReplace(!showFindReplace)}
-              className={`p-2 rounded-lg border text-xs flex items-center gap-1.5 transition-all ${
+              aria-pressed={showFindReplace}
+              className={`p-2 rounded-lg border text-xs flex items-center gap-1.5 transition-all shrink-0 ${
                 showFindReplace
                   ? 'bg-purple-600/20 border-purple-500/50 text-purple-300'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
               }`}
               title="Find & Replace text across subtitles"
             >
@@ -280,7 +313,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
 
           {/* Import SRT File Button */}
           <label
-            className="px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-700 transition-all text-xs flex items-center gap-1.5 cursor-pointer"
+            className="px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-700 transition-all text-xs flex items-center gap-1.5 cursor-pointer shrink-0"
             title="Import existing .srt or .vtt subtitle file"
           >
             <FileText className="w-3.5 h-3.5 text-emerald-400" />
@@ -295,7 +328,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
 
           <button
             onClick={handleAddSubtitle}
-            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 shadow-lg shadow-blue-600/20 transition-all"
+            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-1.5 shadow-lg shadow-blue-600/20 transition-all shrink-0"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add Subtitle</span>
@@ -319,6 +352,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
+                  aria-label="Clear search"
                   className="absolute right-2.5 top-2.5 text-zinc-500 hover:text-white"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -327,7 +361,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
             </div>
             {searchQuery && (
               <span className="text-[11px] text-zinc-400 font-mono">
-                {searchSubtitles(subtitles, searchQuery).length} / {subtitles.length} matches
+                {filteredSubtitles.length} / {subtitles.length} matches
               </span>
             )}
           </div>
@@ -374,37 +408,35 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
         </div>
       )}
 
-      {/* List Container */}
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar"
-      >
-        {subtitles.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-8 text-zinc-500 space-y-3">
-            <RefreshCw className="w-8 h-8 opacity-40 animate-spin-slow" />
-            <p className="text-sm">No subtitles generated yet.</p>
-            <p className="text-xs text-zinc-600 max-w-xs">
-              Upload a video or import an .SRT file to start editing.
-            </p>
-          </div>
-        ) : (
-          searchSubtitles(subtitles, searchQuery).map((item, index) => {
-            const isActive = item.id === activeSubtitleId;
-            return (
-              <div key={`${item.id}-${index}`} ref={isActive ? activeCardRef : null}>
+      {/* List Container: virtualized so thousands of cues stay smooth */}
+      {subtitles.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-center p-8 text-zinc-500 space-y-3">
+          <RefreshCw className="w-8 h-8 opacity-40 animate-spin-slow" />
+          <p className="text-sm">No subtitles generated yet.</p>
+          <p className="text-xs text-zinc-600 max-w-xs">
+            Upload a video or import an .SRT file to start editing.
+          </p>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0">
+          <Virtuoso
+            ref={virtuosoRef}
+            data={filteredSubtitles}
+            className="h-full custom-scrollbar"
+            itemContent={(_index, item) => (
+              <div className="px-4 pt-3">
                 <SubtitleItemCard
                   item={item}
-                  isActive={isActive}
+                  isActive={item.id === activeSubtitleId}
                   onUpdate={handleUpdate}
                   onDelete={handleDelete}
                   onJumpTo={onJumpTo}
                 />
               </div>
-            );
-          })
-        )}
-
-      </div>
+            )}
+          />
+        </div>
+      )}
     </div>
   );
 };

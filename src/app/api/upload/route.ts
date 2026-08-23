@@ -6,7 +6,11 @@ import {
   HttpError,
   createRateLimiter,
   getClientIp,
+  readJsonBody,
+  generateUploadId,
+  isAllowedUploadFileName,
 } from '@/lib/security';
+import { pumpToWriteStream } from '@/lib/streamPump';
 import * as fs from 'fs';
 
 // Upload flow is sensitive to resources.
@@ -37,8 +41,27 @@ function loadSession(id: string): UploadSession | null {
     const p = getSessionFilePath(id);
     if (!fs.existsSync(p)) return null;
     return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch {
+  } catch (e) {
+    console.warn(`Corrupt upload session ${id}, discarding:`, e);
     return null;
+  }
+}
+
+/**
+ * Serializes session mutations per uploadId. Without this, parallel chunk
+ * POSTs interleave their read-modify-write of the session file and lose
+ * size accounting (or double-append), corrupting the upload.
+ */
+const sessionLocks = new Map<string, Promise<unknown>>();
+
+async function withSessionLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionLocks.get(id) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  sessionLocks.set(id, next);
+  try {
+    return await next;
+  } finally {
+    if (sessionLocks.get(id) === next) sessionLocks.delete(id);
   }
 }
 
@@ -54,18 +77,22 @@ export async function POST(req: NextRequest) {
 
     // ACTION: INIT
     if (action === 'init') {
-      const body = await req.json();
+      const body = (await readJsonBody(req)) as { fileName?: string; totalSize?: number };
       const { fileName, totalSize } = body;
 
       if (!fileName || typeof totalSize !== 'number') {
         throw new HttpError(400, 'Missing fileName or totalSize.');
       }
 
+      if (!isAllowedUploadFileName(fileName)) {
+        throw new HttpError(400, 'Unsupported file type. Only video/audio files are accepted.');
+      }
+
       if (totalSize > MAX_UPLOAD_BYTES) {
         throw new HttpError(413, 'File size too large.');
       }
 
-      const id = `ul_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const id = generateUploadId();
       const tempPath = resolveTempPath(`${id}_raw.tmp`);
 
       const session: UploadSession = {
@@ -90,49 +117,42 @@ export async function POST(req: NextRequest) {
         throw new HttpError(400, 'Invalid or missing uploadId.');
       }
 
-      const session = loadSession(uploadId);
-      if (!session) {
-        throw new HttpError(404, 'Upload session not found.');
-      }
-
       if (!req.body) {
         throw new HttpError(400, 'Empty chunk body.');
       }
 
-      const reader = req.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          size += value.length;
-          if (size > MAX_CHUNK_SIZE) {
-            throw new HttpError(413, 'Chunk size exceeds limit.');
-          }
-          chunks.push(value);
+      return await withSessionLock(uploadId!, async () => {
+        const session = loadSession(uploadId!);
+        if (!session) {
+          throw new HttpError(404, 'Upload session not found.');
         }
-      }
 
-      if (session.uploadedSize + size > session.totalSize) {
-        throw new HttpError(400, 'Upload exceeds total declared size.');
-      }
+        // Append data to the temp file, streaming (never buffering the whole
+        // chunk in memory) and enforcing both per-chunk and total size caps.
+        const stream = fs.createWriteStream(session.tempPath, { flags: 'a' });
+        let written = 0;
+        try {
+          const { bytesWritten } = await pumpToWriteStream(req.body!.getReader(), stream, MAX_CHUNK_SIZE);
+          written = bytesWritten;
+        } catch (chunkErr) {
+          stream.destroy();
+          throw chunkErr;
+        }
 
-      // Append data to the temp file
-      const stream = fs.createWriteStream(session.tempPath, { flags: 'a' });
-      for (const chunk of chunks) {
-        stream.write(chunk);
-      }
-      await new Promise((res) => stream.end(res));
+        if (session.uploadedSize + written > session.totalSize) {
+          // Roll back this append so the file matches the recorded size again.
+          try { fs.truncateSync(session.tempPath, session.uploadedSize); } catch {}
+          throw new HttpError(400, 'Upload exceeds total declared size.');
+        }
 
-      session.uploadedSize += size;
-      saveSession(session);
+        session.uploadedSize += written;
+        saveSession(session);
 
-      return NextResponse.json({ 
-        success: true, 
-        uploadedSize: session.uploadedSize,
-        totalSize: session.totalSize
+        return NextResponse.json({
+          success: true,
+          uploadedSize: session.uploadedSize,
+          totalSize: session.totalSize
+        });
       });
     }
 
@@ -142,25 +162,28 @@ export async function POST(req: NextRequest) {
         throw new HttpError(400, 'Invalid uploadId.');
       }
 
-      const session = loadSession(uploadId);
-      if (!session) {
-        throw new HttpError(404, 'Session not found.');
-      }
+      return await withSessionLock(uploadId!, async () => {
+        const session = loadSession(uploadId!);
+        if (!session) {
+          throw new HttpError(404, 'Session not found.');
+        }
 
-      if (session.uploadedSize < session.totalSize) {
-        throw new HttpError(400, 'Upload incomplete.');
-      }
+        if (session.uploadedSize < session.totalSize) {
+          throw new HttpError(400, 'Upload incomplete.');
+        }
 
-      // Final verification: exists and matches
-      const stats = fs.statSync(session.tempPath);
-      if (stats.size !== session.totalSize) {
-         throw new HttpError(500, 'Final file size mismatch on server.');
-      }
+        // Final verification: exists and matches
+        const stats = fs.statSync(session.tempPath);
+        if (stats.size !== session.totalSize) {
+          throw new HttpError(500, 'Final file size mismatch on server.');
+        }
 
-      return NextResponse.json({ 
-        success: true, 
-        tempPath: session.tempPath,
-        fileName: session.fileName
+        // Note: the server temp path is intentionally NOT returned; clients
+        // reference the upload by uploadId (e.g. export attach action).
+        return NextResponse.json({
+          success: true,
+          fileName: session.fileName
+        });
       });
     }
 

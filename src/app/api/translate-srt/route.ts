@@ -2,17 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { SubtitleItem } from '@/lib/types';
 import { requestJSON, SUBTITLE_ARRAY_SCHEMA } from '@/lib/geminiClient';
 import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
-import { readJsonBody, HttpError } from '@/lib/security';
+import { readJsonBody, HttpError, createRateLimiter, getClientIp } from '@/lib/security';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
 
 export const maxDuration = 300; // Allow up to 5 minutes for large SRT batches
 
 const BATCH_SIZE = 100;
 
+const translateLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
+
 export async function POST(req: NextRequest) {
   triggerBackgroundTempCleanup();
 
   try {
+    translateLimiter(getClientIp(req));
+
     const body = (await readJsonBody(req)) as {
       subtitles?: SubtitleItem[];
       targetLanguage?: string;
@@ -29,8 +33,12 @@ export async function POST(req: NextRequest) {
 
     const langName = targetLanguage === 'th' ? 'Thai' : targetLanguage;
     const results: SubtitleItem[] = [];
+    const failedBatches: { from: number; to: number; error: string }[] = [];
+    let firstError: string | null = null;
 
-    // Translate in batches so long subtitle lists never hit prompt/output limits
+    // Translate in batches so long subtitle lists never hit prompt/output
+    // limits. A failed batch no longer discards earlier successful batches —
+    // partial results are returned so the client can keep paid-for work.
     for (let i = 0; i < subtitles.length; i += BATCH_SIZE) {
       const batch = subtitles.slice(i, i + BATCH_SIZE);
 
@@ -45,28 +53,41 @@ CRITICAL REQUIREMENTS:
 Input Subtitles to Translate:
 ${JSON.stringify(batch, null, 2)}`;
 
-      const raw = await requestJSON<
-        { id: string; startTime: string | number; endTime: string | number; originalText: string; translatedText: string }[]
-      >({
-        prompt,
-        schema: SUBTITLE_ARRAY_SCHEMA,
-        signal: req.signal,
-      });
-
-      for (const item of raw || []) {
-        results.push({
-          id: item.id,
-          startTime: parseTimestampToSeconds(item.startTime),
-          endTime: parseTimestampToSeconds(item.endTime),
-          originalText: String(item.originalText || '').trim(),
-          translatedText: String(item.translatedText || '').trim(),
+      try {
+        const raw = await requestJSON<
+          { id: string; startTime: string | number; endTime: string | number; originalText: string; translatedText: string }[]
+        >({
+          prompt,
+          schema: SUBTITLE_ARRAY_SCHEMA,
+          signal: req.signal,
         });
+
+        for (const item of raw || []) {
+          results.push({
+            id: item.id,
+            startTime: parseTimestampToSeconds(item.startTime),
+            endTime: parseTimestampToSeconds(item.endTime),
+            originalText: String(item.originalText || '').trim(),
+            translatedText: String(item.translatedText || '').trim(),
+          });
+        }
+      } catch (batchError: unknown) {
+        const errMessage = batchError instanceof Error ? batchError.message : String(batchError);
+        if (!firstError) firstError = errMessage;
+        failedBatches.push({ from: i, to: Math.min(i + BATCH_SIZE, subtitles.length), error: errMessage });
+        console.error(`SRT translation batch ${i}-${Math.min(i + BATCH_SIZE, subtitles.length)} failed:`, batchError);
       }
+    }
+
+    if (results.length === 0) {
+      throw new HttpError(502, firstError || 'All translation batches failed.');
     }
 
     return NextResponse.json({
       success: true,
       subtitles: sanitizeAndFixOverlaps(results),
+      partial: failedBatches.length > 0,
+      failedBatches,
     });
   } catch (error: unknown) {
     console.error('Error translating SRT:', error);

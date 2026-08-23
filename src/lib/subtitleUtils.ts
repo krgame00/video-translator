@@ -1,6 +1,41 @@
 import { SubtitleItem } from './types';
 
 /**
+ * Binary search for the subtitle active at time t (first item whose
+ * startTime <= t <= endTime). Subtitles are normally sorted by startTime;
+ * falls back to a linear scan when they are not.
+ */
+export function findActiveSubtitle(subtitles: SubtitleItem[], t: number): SubtitleItem | undefined {
+  if (subtitles.length === 0) return undefined;
+
+  let sorted = true;
+  for (let i = 1; i < subtitles.length; i++) {
+    if (subtitles[i].startTime < subtitles[i - 1].startTime) {
+      sorted = false;
+      break;
+    }
+  }
+  if (!sorted) {
+    return subtitles.find((item) => t >= item.startTime && t <= item.endTime);
+  }
+
+  let lo = 0;
+  let hi = subtitles.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const item = subtitles[mid];
+    if (t < item.startTime) {
+      hi = mid - 1;
+    } else if (t > item.endTime) {
+      lo = mid + 1;
+    } else {
+      return item;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Filters subtitles by query string (case-insensitive) across translatedText and originalText
  */
 export function searchSubtitles(subtitles: SubtitleItem[], query: string): SubtitleItem[] {

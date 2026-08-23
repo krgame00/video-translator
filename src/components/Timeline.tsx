@@ -12,6 +12,7 @@ interface TimelineProps {
   activeId?: string | null;
   onUpdateSub?: (id: string, patch: Partial<Pick<SubtitleItem, 'startTime' | 'endTime'>>) => void;
   onDragStart?: () => void;
+  onDecodeError?: () => void;
 }
 
 type GestureMode = 'move' | 'resizeStart' | 'resizeEnd';
@@ -33,28 +34,38 @@ export const Timeline: React.FC<TimelineProps> = ({
   activeId,
   onUpdateSub,
   onDragStart,
+  onDecodeError,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const [peaks, setPeaks] = useState<number[]>([]);
   const [isDecoding, setIsDecoding] = useState(false);
+  const [canvasSize, setCanvasSize] = useState({ w: 1200, h: 96 });
   const [cursor, setCursor] = useState<'crosshair' | 'grabbing' | 'ew-resize' | 'grab' | 'pointer' | 'default'>('crosshair');
   const gestureRef = useRef<Gesture | null>(null);
+  // Keep the callback in a ref so the decode effect only depends on the file
+  // (an inline arrow from the parent would otherwise re-trigger decoding on
+  // every parent render).
+  const onDecodeErrorRef = useRef(onDecodeError);
+  useEffect(() => { onDecodeErrorRef.current = onDecodeError; }, [onDecodeError]);
 
   // Decode audio amplitude peaks (single pass, reused for draws)
   useEffect(() => {
     if (!selectedFile) {
-      setTimeout(() => setPeaks([]), 0);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPeaks([]);
       return;
     }
     let isSubscribed = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsDecoding(true);
 
     selectedFile
       .arrayBuffer()
       .then((ab) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const AudioCtx = window.AudioContext ||
+          (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!AudioCtx) throw new Error('Web Audio API unavailable');
+        const audioCtx = new AudioCtx();
         audioCtx
           .decodeAudioData(ab)
           .then((buffer) => {
@@ -81,16 +92,43 @@ export const Timeline: React.FC<TimelineProps> = ({
           })
           .catch(() => {
             audioCtx.close().catch(() => {});
-            if (isSubscribed) setIsDecoding(false);
+            if (isSubscribed) {
+              setIsDecoding(false);
+              onDecodeErrorRef.current?.();
+            }
           });
       })
       .catch(() => {
-        if (isSubscribed) setIsDecoding(false);
+        if (isSubscribed) {
+          setIsDecoding(false);
+          onDecodeErrorRef.current?.();
+        }
       });
 
     return () => {
       isSubscribed = false;
     };
+  }, [selectedFile]);
+
+  // HiDPI-aware canvas sizing: the backing store follows the wrapper's CSS
+  // size × devicePixelRatio (capped at 2) and re-renders on window resizes.
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+
+    const updateSize = () => {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const rect = wrapper.getBoundingClientRect();
+      setCanvasSize({
+        w: Math.max(100, Math.round(rect.width * dpr)),
+        h: Math.max(40, Math.round(rect.height * dpr)),
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(wrapper);
+    return () => observer.disconnect();
   }, [selectedFile]);
 
   // Single draw pass: waveform + subtitle blocks + playhead + time ruler
@@ -157,7 +195,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     ctx.moveTo(px, 0);
     ctx.lineTo(px, height);
     ctx.stroke();
-  }, [peaks, currentTime, duration, subtitles, activeId]);
+  }, [peaks, currentTime, duration, subtitles, activeId, canvasSize]);
 
   const pxToTime = useCallback(
     (clientX: number) => {
@@ -266,11 +304,11 @@ export const Timeline: React.FC<TimelineProps> = ({
           {formatClock(currentTime)} / {formatClock(duration)}
         </span>
       </div>
-      <div className="relative w-full h-24 bg-zinc-950 rounded-xl overflow-hidden border border-border">
+      <div ref={wrapperRef} className="relative w-full h-24 bg-zinc-950 rounded-xl overflow-hidden border border-border">
         <canvas
           ref={canvasRef}
-          width={1200}
-          height={96}
+          width={canvasSize.w}
+          height={canvasSize.h}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={endGesture}
@@ -286,15 +324,15 @@ export const Timeline: React.FC<TimelineProps> = ({
           </div>
         )}
       </div>
-      <p className="text-[11px] text-zinc-500">
+      <p className="text-[11px] text-zinc-500 hidden sm:block">
         Click to seek · drag block to move · drag edge to resize duration (active block shows white handles)
       </p>
     </div>
   );
 };
 
-// Edge hit tolerance in px
-const EDGE_PX = 6;
+// Edge hit tolerance in px — generous enough for a fingertip on touch screens
+const EDGE_PX = 10;
 
 function formatClock(secs: number) {
   const m = Math.floor(secs / 60);

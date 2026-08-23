@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Itim } from "next/font/google";
 import "./globals.css";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -22,6 +22,14 @@ const itimFont = Itim({
 export const metadata: Metadata = {
   title: "Video Subtitle Translator Studio | Gemini AI",
   description: "AI-Powered Video Speech-to-Text Transcription & Subtitle Translation Studio",
+};
+
+// viewport-fit=cover extends under the notch/home indicator so the studio
+// uses the full phone screen; content respects it via env(safe-area-inset-*).
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({

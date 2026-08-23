@@ -5,6 +5,7 @@ const envSchema = z.object({
   TEMP_DIR: z.string().optional(),
   FFMPEG_PATH: z.string().optional(), // Path to FFmpeg executable
   FFMPEG_HWACCEL: z.string().optional(), // e.g. "cuda", "vaapi", "qsv"
+  CRON_SECRET: z.string().optional(), // Required by /api/cron/clean-temp when set
 });
 
 /**

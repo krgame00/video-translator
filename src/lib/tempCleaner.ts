@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
-import { env } from './env';
+import { getTempRoot } from './security';
 
 /**
  * Sweeps the temporary directory and removes expired temporary files created by
@@ -20,7 +19,7 @@ export function cleanExpiredTempFiles(
   maxAgeMs: number = 3600 * 1000,
   maxTotalSizeMb: number = 2048 // 2GB Quota
 ): number {
-  const tempDir = env.tempDir || os.tmpdir();
+  const tempDir = getTempRoot();
   if (!fs.existsSync(tempDir)) return 0;
 
   const now = Date.now();
@@ -76,10 +75,13 @@ export function cleanExpiredTempFiles(
       }
     }
 
-    // 2. Size Guard: If total size still exceeds threshold, remove oldest non-expired files
+    // 2. Size Guard: If total size still exceeds threshold, remove oldest
+    // non-expired files. Files touched within the last 15 minutes are skipped
+    // so in-flight uploads and active encode jobs are never killed.
     if (totalSizeSum > maxTotalSizeMb * 1024 * 1024) {
-      const candidates = ourFiles.filter(f => !f.expired && fs.existsSync(f.path))
-        .sort((a, b) => b.age - a.age); // Oldest first
+      const candidates = ourFiles.filter(
+        (f) => !f.expired && f.age > 15 * 60 * 1000 && fs.existsSync(f.path)
+      ).sort((a, b) => b.age - a.age); // Oldest first
       
       for (const item of candidates) {
         try {

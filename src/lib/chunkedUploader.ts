@@ -7,7 +7,6 @@ export interface ChunkedUploaderOptions {
 
 export interface ChunkedUploadResult {
   uploadId: string;
-  tempPath: string;
 }
 
 export async function uploadFileInChunks({
@@ -60,5 +59,5 @@ export async function uploadFileInChunks({
     throw new Error(compData.error || 'Failed to complete upload');
   }
 
-  return { uploadId, tempPath: compData.tempPath };
+  return { uploadId };
 }

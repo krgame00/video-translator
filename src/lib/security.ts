@@ -1,27 +1,69 @@
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { SubtitleStyle } from './types';
+import { env } from './env';
 
 const JOB_ID_RE = /^hs_[a-zA-Z0-9_]{1,40}$/;
 const UPLOAD_ID_RE = /^ul_[a-zA-Z0-9_]{1,40}$/;
 
 /**
- * Export job IDs are server-generated as `hs_<timestamp>_<random>`.
- * Reject anything else before it is used in file paths or shell commands.
+ * Single source of truth for the temp directory used by uploads, export jobs,
+ * the Gemini pipeline, and the temp cleaner. Falls back to os.tmpdir() when
+ * TEMP_DIR is unset or does not exist so all subsystems always agree.
+ */
+export function getTempRoot(): string {
+  const custom = env.tempDir;
+  if (custom && fs.existsSync(custom)) {
+    return path.resolve(custom);
+  }
+  return path.resolve(os.tmpdir());
+}
+
+/**
+ * Export job IDs are server-generated as `hs_<32 hex chars>` (128 bits of
+ * entropy). Reject anything else before it is used in file paths.
  */
 export function isSafeJobId(id: string | null | undefined): id is string {
   return typeof id === 'string' && JOB_ID_RE.test(id);
 }
 
 /**
- * Upload IDs are server-generated as `ul_<timestamp>_<random>`.
+ * Upload IDs are server-generated as `ul_<32 hex chars>`.
  */
 export function isSafeUploadId(id: string | null | undefined): id is string {
   return typeof id === 'string' && UPLOAD_ID_RE.test(id);
 }
 
+/** Generates an unguessable job ID (`hs_` + 128 random bits as hex). */
+export function generateJobId(): string {
+  return `hs_${crypto.randomBytes(16).toString('hex')}`;
+}
+
+/** Generates an unguessable upload ID (`ul_` + 128 random bits as hex). */
+export function generateUploadId(): string {
+  return `ul_${crypto.randomBytes(16).toString('hex')}`;
+}
+
+/** File extensions accepted for video/audio uploads. */
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+  '.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v',
+  '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus',
+]);
+
 /**
- * Resolves a plain file name inside the OS temp directory and rejects
+ * Light filename validation for uploads: only plain names with a known
+ * media extension are accepted (defense in depth; not magic-byte sniffing).
+ */
+export function isAllowedUploadFileName(fileName: string): boolean {
+  if (!fileName || fileName.length > 255 || fileName.includes('\0')) return false;
+  const ext = path.extname(fileName).toLowerCase();
+  return ALLOWED_UPLOAD_EXTENSIONS.has(ext);
+}
+
+/**
+ * Resolves a plain file name inside the shared temp directory and rejects
  * anything that would escape it (path traversal defense in depth).
  */
 export function resolveTempPath(name: string): string {
@@ -29,8 +71,8 @@ export function resolveTempPath(name: string): string {
   if (base !== name) {
     throw new Error('Invalid temp file name.');
   }
-  const tempRoot = path.resolve(os.tmpdir()) + path.sep;
-  const resolved = path.resolve(os.tmpdir(), base);
+  const tempRoot = getTempRoot() + path.sep;
+  const resolved = path.resolve(getTempRoot(), base);
   if (!resolved.startsWith(tempRoot)) {
     throw new Error('Temp file path escapes temp directory.');
   }
@@ -133,7 +175,11 @@ export async function readJsonBody(
   if (text.length > maxBytes) {
     throw new HttpError(413, 'Request body exceeds the maximum allowed size.');
   }
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new HttpError(400, 'Request body is not valid JSON.');
+  }
 }
 
 export function getClientIp(req: { headers: Headers }): string {
@@ -142,12 +188,21 @@ export function getClientIp(req: { headers: Headers }): string {
   return req.headers.get('x-real-ip') || 'unknown';
 }
 
-/** Light in-memory per-key rate limiter (guards Gemini quota from casual abuse). */
+/**
+ * Light in-memory per-key rate limiter (guards Gemini quota from casual abuse).
+ * Stale entries are evicted once the map grows so long-lived processes do not
+ * leak memory across many distinct client IPs.
+ */
 export function createRateLimiter(opts: { windowMs: number; max: number }) {
   const hits = new Map<string, { count: number; resetAt: number }>();
 
   return (key: string): void => {
     const now = Date.now();
+    if (hits.size > 1000) {
+      for (const [k, rec] of hits) {
+        if (rec.resetAt < now) hits.delete(k);
+      }
+    }
     const rec = hits.get(key);
     if (!rec || rec.resetAt < now) {
       hits.set(key, { count: 1, resetAt: now + opts.windowMs });
