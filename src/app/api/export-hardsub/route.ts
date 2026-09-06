@@ -119,7 +119,12 @@ async function runFFmpegEncoding(jobId: string) {
       '-i', inFileName,
       '-vf', `ass='${subFileName}'${fontsDirArg}`,
       '-c:v', 'libx264',
-      '-preset', 'ultrafast',
+      // veryfast + crf 26: ultrafast's default rate control produced ~14Mbps
+      // files (250MB for a 3-min portrait clip) that stall weak players;
+      // veryfast compresses ~4x smaller at similar visual quality for only
+      // ~2.4x encode time (still realtime-plus on a desktop CPU).
+      '-preset', 'veryfast',
+      '-crf', '26',
       '-profile:v', 'main',
       '-level', '4.1',
       '-pix_fmt', 'yuv420p',
@@ -484,18 +489,15 @@ export async function GET(req: NextRequest) {
     const stats = fs.statSync(job.outPath);
     const fileStream = fs.createReadStream(job.outPath);
 
-    const webStream = new ReadableStream({
-      start(controller) {
-        fileStream.on('data', (chunk) => controller.enqueue(chunk));
-        fileStream.on('end', () => {
-          controller.close();
-          deleteJob(jobId);
-        });
-        fileStream.on('error', (err) => {
-          controller.error(err);
-        });
-      },
-    });
+    // ReadableStream.from adapts the Node stream with proper backpressure —
+    // the previous push-into-controller approach buffered the whole video
+    // (potentially hundreds of MB) in server memory during download.
+    // (cast: lib.dom's ReadableStream static type lacks `.from`)
+    const fromNode = ReadableStream as unknown as {
+      from: (src: fs.ReadStream) => ReadableStream<Uint8Array>;
+    };
+    const webStream = fromNode.from(fileStream);
+    fileStream.on('end', () => deleteJob(jobId));
 
     return new NextResponse(webStream, {
       status: 200,
