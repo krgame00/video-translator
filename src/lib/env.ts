@@ -1,26 +1,7 @@
-import { z } from 'zod';
-
-const envSchema = z.object({
-  GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
-  TEMP_DIR: z.string().optional(),
-  FFMPEG_PATH: z.string().optional(), // Path to FFmpeg executable
-  FFMPEG_HWACCEL: z.string().optional(), // e.g. "cuda", "vaapi", "qsv"
-  CRON_SECRET: z.string().optional(), // Required by /api/cron/clean-temp when set
-});
-
 /**
- * Validates and parses environment variables.
- * Call this in server-side entries to ensure config is correct.
+ * Server-side environment accessors. Values are read lazily so tests and
+ * route handlers always see the current process.env.
  */
-export function validateEnv() {
-  const result = envSchema.safeParse(process.env);
-  if (!result.success) {
-    console.error('❌ Invalid environment variables:', result.error.flatten().fieldErrors);
-    throw new Error('Invalid environment variables.');
-  }
-  return result.data;
-}
-
 export const env = {
   get apiKeys(): string[] {
     const raw = process.env.GEMINI_API_KEY || '';
@@ -34,5 +15,9 @@ export const env = {
   },
   get ffmpegHwaccel(): string | undefined {
     return process.env.FFMPEG_HWACCEL;
-  }
+  },
+  /** Required by /api/cron/clean-temp when set; unset keeps the endpoint open. */
+  get cronSecret(): string | undefined {
+    return process.env.CRON_SECRET;
+  },
 };

@@ -83,8 +83,6 @@ const DEFAULT_STYLE: SubtitleStyle = {
   fontName: 'Itim',
   fontSize: 22,
   primaryColor: 'FFFFFF',
-  outlineColor: '000000',
-  backColor: '000000',
   borderStyle: 1,
   marginV: 30,
 };
@@ -112,7 +110,7 @@ export function sanitizeStyle(raw: unknown): SubtitleStyle {
   const fontSize = clampInt(o.fontSize, 10, 60);
   if (fontSize !== undefined) style.fontSize = fontSize;
 
-  for (const key of ['primaryColor', 'outlineColor', 'backColor'] as const) {
+  for (const key of ['primaryColor'] as const) {
     if (typeof o[key] === 'string' && /^[0-9A-Fa-f]{6}$/.test(o[key])) {
       style[key] = o[key];
     }

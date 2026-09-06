@@ -54,7 +54,8 @@ export function searchSubtitles(subtitles: SubtitleItem[], query: string): Subti
 }
 
 /**
- * Replaces matching text across subtitle array items
+ * Replaces matching text across subtitle items. Items whose translated text
+ * changed lose their karaoke word timings (stale after any text change).
  */
 export function findAndReplaceSubtitles(
   subtitles: SubtitleItem[],
@@ -71,7 +72,7 @@ export function findAndReplaceSubtitles(
 
   return subtitles.map((item) => {
     if (!item) return item;
-    const updated = { ...item };
+    const updated: SubtitleItem = { ...item };
 
     if (targetField === 'translatedText' || targetField === 'both') {
       updated.translatedText = item.translatedText ? item.translatedText.replace(regex, replaceText) : '';
@@ -79,6 +80,10 @@ export function findAndReplaceSubtitles(
 
     if (targetField === 'originalText' || targetField === 'both') {
       updated.originalText = item.originalText ? item.originalText.replace(regex, replaceText) : '';
+    }
+
+    if (updated.translatedText !== item.translatedText) {
+      updated.words = undefined;
     }
 
     return updated;
@@ -144,28 +149,5 @@ export function splitSubtitleItem(
   return updated;
 }
 
-/**
- * Merges a subtitle item with the next adjacent subtitle item
- */
-export function mergeSubtitleItem(
-  subtitles: SubtitleItem[],
-  id: string
-): SubtitleItem[] {
-  const index = subtitles.findIndex((item) => item.id === id);
-  if (index === -1 || index >= subtitles.length - 1) return subtitles;
-
-  const current = subtitles[index];
-  const next = subtitles[index + 1];
-
-  const merged: SubtitleItem = {
-    id: current.id,
-    startTime: current.startTime,
-    endTime: next.endTime,
-    originalText: `${current.originalText} ${next.originalText}`.trim(),
-    translatedText: `${current.translatedText} ${next.translatedText}`.trim(),
-  };
-
-  const updated = [...subtitles];
-  updated.splice(index, 2, merged);
-  return updated;
-}
+// (mergeSubtitleItem removed — unwired; recover from git history if a merge
+// button is ever added alongside the split button.)

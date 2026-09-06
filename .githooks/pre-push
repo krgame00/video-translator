@@ -1,0 +1,4 @@
+#!/bin/sh
+# Versioned pre-push quality gate. Activate with:
+#   git config core.hooksPath .githooks
+node "$(git rev-parse --show-toplevel)/scripts/quality-gate.mjs"

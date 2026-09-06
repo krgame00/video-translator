@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cleanExpiredTempFiles } from '@/lib/tempCleaner';
+import { env } from '@/lib/env';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic';
  * open so existing workflows keep working.
  */
 function isAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
+  const secret = env.cronSecret;
   if (!secret) return true;
 
   const authHeader = req.headers.get('authorization');

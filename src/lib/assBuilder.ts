@@ -106,7 +106,6 @@ function buildDialogueText(
   maxUnitsPerLine: number
 ): string {
   const text = (item.translatedText || '').trim();
-  const unitOf = (s: string) => s.replace(THAI_ZERO_WIDTH, '').length;
 
   // Karaoke: group word spans into wrapped lines with the same unit budget,
   // emitting {\k} per word and \N between lines. Latin words get a trailing
@@ -157,12 +156,18 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
   const marginLR = Math.max(0, Math.round(10 * (playResX / ASS_BASE_PLAY_RES_Y)));
   const alignment = POSITION_TO_ASS_ALIGNMENT[style.position ?? 'bottom'] ?? 2;
 
-  const primary = rgbToAssColor(opts.highlightColor || style.primaryColor || 'FFFFFF');
-  const secondary = rgbToAssColor(style.primaryColor || 'FFFFFF');
+  const primary = rgbToAssColor(style.primaryColor || 'FFFFFF');
+  const secondary = primary;
   const outline = rgbToAssColor('000000');
   // BorderStyle 1 (outline) → fully transparent box; 4 (opaque box) → 50% black
   const back = style.borderStyle === 4 ? '&H80000000' : '&HFF000000';
   const borderStyle = style.borderStyle === 4 ? 4 : 1;
+
+  // Karaoke style: sung words (Primary) sweep from the base text (Secondary)
+  // to the highlight color. Kept as a SEPARATE style so plain cues in a mixed
+  // file keep the exact text color.
+  const karaokePrimary = rgbToAssColor(opts.highlightColor || style.primaryColor || 'FFFFFF');
+  const karaokeStyleLine = `Style: Karaoke,Itim,${fontsize},${karaokePrimary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},2,0,${alignment},${marginLR},${marginLR},${marginV},1`;
 
   // Line-budget: spacing characters per wrapped line, from the real frame
   // width minus scaled side margins (Thai glyph ≈ 0.58 × Fontsize wide).
@@ -184,15 +189,18 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
     `Style: Default,Itim,${fontsize},${primary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},2,0,${alignment},${marginLR},${marginLR},${marginV},1`,
+    karaokeStyleLine,
   ].join('\r\n');
 
   const events = [
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-    ...subtitles.map(
-      (item) =>
-        `Dialogue: 0,${formatAssTime(item.startTime)},${formatAssTime(item.endTime)},Default,,0,0,0,,${buildDialogueText(item, !!opts.karaoke, maxUnitsPerLine)}`
-    ),
+    ...subtitles.map((item) => {
+      const isKaraoke = !!opts.karaoke && Array.isArray(item.words) && item.words.length > 0;
+      const text = buildDialogueText(item, isKaraoke, maxUnitsPerLine);
+      const styleName = isKaraoke ? 'Karaoke' : 'Default';
+      return `Dialogue: 0,${formatAssTime(item.startTime)},${formatAssTime(item.endTime)},${styleName},,0,0,0,,${text}`;
+    }),
   ].join('\r\n');
 
   return [header, styles, events].join('\r\n\r\n') + '\r\n';

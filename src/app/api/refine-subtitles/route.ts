@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SubtitleItem } from '@/lib/types';
 import { requestJSON, SUBTITLE_ARRAY_SCHEMA } from '@/lib/geminiClient';
+import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
 import { readJsonBody, HttpError, createRateLimiter, getClientIp } from '@/lib/security';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
 
@@ -19,6 +20,7 @@ const STYLE_PROMPTS: Record<string, string> = {
 };
 
 export async function POST(req: NextRequest) {
+  triggerBackgroundTempCleanup();
   try {
     refineLimiter(getClientIp(req));
 

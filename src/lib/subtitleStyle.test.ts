@@ -40,7 +40,7 @@ function testLoadFallbacks() {
 function testRoundTrip() {
   const storage: Record<string, string> = {};
   withLocalStorageStub(storage);
-  const saved = { position: 'top' as const, fontSize: 26, primaryColor: '4ADE80', borderStyle: 4 as const, marginV: 88 };
+  const saved = { position: 'top' as const, fontSize: 26, primaryColor: '4ADE80', highlightColor: 'FFFF00', borderStyle: 4 as const, marginV: 88 };
   saveSubtitleStyle(saved);
   const loaded = loadSubtitleStyle();
   console.assert(JSON.stringify(loaded) === JSON.stringify(saved), 'save → load must round-trip exactly');

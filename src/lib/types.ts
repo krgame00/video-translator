@@ -10,9 +10,7 @@ export interface SubtitleItem {
 export interface SubtitleStyle {
   fontName?: string;
   fontSize?: number;
-  primaryColor?: string; // Hex color string without '#'
-  outlineColor?: string; // Hex color string without '#'
-  backColor?: string;    // Hex color string without '#' (with optional alpha)
+  primaryColor?: string; // Hex color string without '#' — base text color
   borderStyle?: number;  // 1=Outline+DropShadow, 4=OpaqueBox (standard SRT style 4 in ASS)
   marginV?: number;
   position?: 'top' | 'middle' | 'bottom';
@@ -28,7 +26,6 @@ export interface ExportJob {
   subPath: string;
   outPath: string;
   createdAt: number;
-  style?: SubtitleStyle;
   /** Media duration in seconds (optional, enables real encode progress). */
   duration?: number;
   /** Real video dimensions — the ASS PlayRes must match them for WYSIWYG. */

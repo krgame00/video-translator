@@ -351,7 +351,24 @@ export default function Home() {
   }, []);
 
   const handleTimelineUpdateSub = useCallback((id: string, patch: Partial<Pick<SubtitleItem, 'startTime' | 'endTime'>>) => {
-    dispatch({ type: 'UPDATE_SUBTITLES', payload: subtitlesRef.current.map((s) => s.id === id ? { ...s, ...patch } : s) });
+    dispatch({
+      type: 'UPDATE_SUBTITLES',
+      payload: subtitlesRef.current.map((s) => {
+        if (s.id !== id) return s;
+        const next = { ...s, ...patch };
+        // Shift karaoke word timings along with the cue so the preview
+        // highlight tracks the moved cue instead of stale absolute times.
+        if (next.words && patch.startTime !== undefined) {
+          const d = patch.startTime - s.startTime;
+          next.words = next.words.map((w) => ({
+            ...w,
+            start: +(Math.max(next.startTime, w.start + d)).toFixed(3),
+            end: +(Math.min(next.endTime, w.end + d)).toFixed(3),
+          }));
+        }
+        return next;
+      }),
+    });
   }, []);
 
   const formatTimeMinutes = (secs: number) => {

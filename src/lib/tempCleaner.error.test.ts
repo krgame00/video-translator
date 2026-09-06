@@ -8,13 +8,16 @@ function testErrorHandling() {
   const now = Date.now();
   const twoHoursAgo = now - 2 * 3600 * 1000;
 
-  // Test 1: Non-existent directory (should not throw, return 0)
+  // Test 1: Non-existent directory (should not throw, return 0).
+  // getTempRoot() honours TEMP_DIR, so point it at a missing path.
+  const prevTempDir = process.env.TEMP_DIR;
   try {
-    // We can't easily test this without modifying the function to accept a custom path
-    // but we can test that the function handles missing directory gracefully
-    console.assert(true, 'Non-existent directory test skipped (requires function modification)');
-  } catch (err) {
-    console.assert(false, `Should not throw on non-existent directory: ${err}`);
+    process.env.TEMP_DIR = path.join(tempDir, `missing_dir_${now}`);
+    const deleted = cleanExpiredTempFiles(3600 * 1000);
+    console.assert(deleted === 0, `Non-existent temp dir should delete nothing (got ${deleted})`);
+  } finally {
+    if (prevTempDir === undefined) delete process.env.TEMP_DIR;
+    else process.env.TEMP_DIR = prevTempDir;
   }
 
   // Test 2: Files with permission errors (simulate by creating read-only file on Windows not easy, skip)
@@ -23,21 +26,21 @@ function testErrorHandling() {
   fs.writeFileSync(lockedFile, 'locked content');
   fs.utimesSync(lockedFile, twoHoursAgo / 1000, twoHoursAgo / 1000);
 
-  // Open file handle to simulate lock (Windows)
+  // Open the file while sweeping. NOTE: Node opens files with FILE_SHARE_DELETE
+  // on Windows, so deletion may legitimately succeed — what must hold is that
+  // the sweep completes without throwing and returns a sane count.
   let fd;
+  let swept = -1;
   try {
     fd = fs.openSync(lockedFile, 'r');
-    cleanExpiredTempFiles(3600 * 1000);
-    // On Windows, file cannot be deleted while open
-    const exists = fs.existsSync(lockedFile);
-    console.assert(exists, 'Locked file should not be deleted on Windows');
-    console.log(`[Error Handling] Locked file handled correctly (deleted: ${!exists})`);
+    swept = cleanExpiredTempFiles(3600 * 1000);
   } catch (err) {
-    console.log(`[Error Handling] Locked file test error (expected): ${err}`);
+    console.log(`[Error Handling] Locked file test error (unexpected): ${err}`);
   } finally {
-    if (fd) fs.closeSync(fd);
+    if (fd !== undefined) fs.closeSync(fd);
     if (fs.existsSync(lockedFile)) fs.unlinkSync(lockedFile);
   }
+  console.assert(swept >= 0, `Sweep with an open handle must complete and return a count (got ${swept})`);
 
   // Test 4: Directory with no matching files
   const deletedCountEmpty = cleanExpiredTempFiles(3600 * 1000);

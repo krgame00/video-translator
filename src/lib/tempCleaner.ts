@@ -49,25 +49,47 @@ export function cleanExpiredTempFiles(
         const filePath = path.join(tempDir, file);
         try {
           const stat = fs.statSync(filePath);
-          ourFiles.push({
-            name: file,
-            path: filePath,
-            age: now - stat.mtimeMs,
-            size: stat.size,
-            expired: (now - stat.mtimeMs) >= maxAgeMs
-          });
-          totalSizeSum += stat.size;
+          if (stat.isDirectory()) {
+            // Export-job font dirs (`hs_*_fonts`) — count their content size
+            // so the quota branch sees them; deletion uses rmSync below.
+            let dirSize = 0;
+            try {
+              for (const f of fs.readdirSync(filePath)) {
+                dirSize += fs.statSync(path.join(filePath, f)).size;
+              }
+            } catch {}
+            ourFiles.push({
+              name: file,
+              path: filePath,
+              age: now - stat.mtimeMs,
+              size: dirSize,
+              expired: (now - stat.mtimeMs) >= maxAgeMs
+            });
+          } else {
+            ourFiles.push({
+              name: file,
+              path: filePath,
+              age: now - stat.mtimeMs,
+              size: stat.size,
+              expired: (now - stat.mtimeMs) >= maxAgeMs
+            });
+          }
+          totalSizeSum += ourFiles[ourFiles.length - 1].size;
         } catch (fileErr) {
           console.warn(`[Temp Cleaner] Skip file ${file}:`, fileErr);
         }
       }
     }
 
-    // 1. Delete expired items
+    // 1. Delete expired items (directories via rmSync — unlinkSync throws on dirs)
     for (const item of ourFiles) {
       if (item.expired) {
         try {
-          fs.unlinkSync(item.path);
+          if (fs.existsSync(item.path) && fs.statSync(item.path).isDirectory()) {
+            fs.rmSync(item.path, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(item.path);
+          }
           deletedCount++;
           totalSizeSum -= item.size;
           console.log(`[Temp Cleaner] Removed expired temp file (${Math.round(item.age / 60000)}m old): ${item.name}`);
@@ -85,7 +107,11 @@ export function cleanExpiredTempFiles(
       
       for (const item of candidates) {
         try {
-          fs.unlinkSync(item.path);
+          if (fs.existsSync(item.path) && fs.statSync(item.path).isDirectory()) {
+            fs.rmSync(item.path, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(item.path);
+          }
           deletedCount++;
           totalSizeSum -= item.size;
           console.log(`[Temp Cleaner] Quota limit exceeded. Removing oldest: ${item.name} (${Math.round(item.size / 1024 / 1024)}MB)`);

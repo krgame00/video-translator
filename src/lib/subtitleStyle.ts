@@ -1,7 +1,8 @@
 export interface SubtitleStyleSettings {
   position: 'top' | 'middle' | 'bottom'; // default 'bottom'
   fontSize: number;                      // 18 | 22 | 26 (libass units)
-  primaryColor: string;                  // 6-hex, no '#'
+  primaryColor: string;                  // 6-hex, no '#' — base text color
+  highlightColor: string;                // 6-hex — karaoke sung-word color
   borderStyle: 1 | 4;                    // 1 = outline, 4 = opaque box
   marginV: number;                       // px from frame edge, 10–120
 }
@@ -10,6 +11,7 @@ export const DEFAULT_SUBTITLE_STYLE: SubtitleStyleSettings = {
   position: 'bottom',
   fontSize: 22,
   primaryColor: 'FFFFFF',
+  highlightColor: 'FFFF00',
   borderStyle: 1,
   marginV: 30,
 };
@@ -57,6 +59,13 @@ export function loadSubtitleStyle(): SubtitleStyleSettings {
       const cleanHex = parsed.primaryColor.replace(/^#/, '').toUpperCase();
       if (/^[0-9A-F]{6}$/.test(cleanHex)) {
         result.primaryColor = cleanHex;
+      }
+    }
+
+    if (typeof parsed.highlightColor === 'string') {
+      const cleanHex = parsed.highlightColor.replace(/^#/, '').toUpperCase();
+      if (/^[0-9A-F]{6}$/.test(cleanHex)) {
+        result.highlightColor = cleanHex;
       }
     }
 

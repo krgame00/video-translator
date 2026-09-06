@@ -6,7 +6,7 @@ import { SubtitleItem } from '@/lib/types';
 import { SubtitleItemCard } from './SubtitleItemCard';
 import { Plus, ArrowDownAZ, RefreshCw, Eye, EyeOff, Sparkles, Loader2, FileText, Languages, Search, Replace, X } from 'lucide-react';
 import { parseSRT } from '@/lib/srtFormatter';
-import { searchSubtitles, findAndReplaceSubtitles, findActiveSubtitle } from '@/lib/subtitleUtils';
+import { searchSubtitles, findAndReplaceSubtitles, findActiveSubtitle, splitSubtitleItem } from '@/lib/subtitleUtils';
 
 interface SubtitleEditorProps {
   subtitles: SubtitleItem[];
@@ -70,12 +70,17 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
     reader.onload = (event) => {
       const content = event.target?.result as string;
       if (content) {
-        const parsed = parseSRT(content);
-        if (parsed.length === 0) {
-          notify?.(`Could not parse subtitles from "${file.name}". Check format.`, 'error');
-        } else {
-          onSubtitlesChange(parsed);
-          notify?.(`Imported ${parsed.length} cues from ${file.name}`, 'success');
+        try {
+          const parsed = parseSRT(content);
+          if (parsed.length === 0) {
+            notify?.(`Could not parse subtitles from "${file.name}". Check format.`, 'error');
+          } else {
+            onSubtitlesChange(parsed);
+            notify?.(`Imported ${parsed.length} cues from ${file.name}`, 'success');
+          }
+        } catch {
+          // parseTimestampToSeconds throws on malformed timestamp lines
+          notify?.(`ไฟล์ "${file.name}" มีบรรทัดเวลาที่อ่านไม่ได้ — ตรวจรูปแบบ SRT/VTT อีกครั้ง`, 'error');
         }
       }
     };
@@ -172,6 +177,11 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   const handleDelete = useCallback((id: string) => {
     onSubtitlesChange(subtitlesRef.current.filter((item) => item.id !== id));
   }, [onSubtitlesChange]);
+
+  const handleSplit = useCallback((id: string) => {
+    onSubtitlesChange(splitSubtitleItem(subtitlesRef.current, id));
+    notify?.('Split cue at the midpoint (word-aware)', 'info');
+  }, [onSubtitlesChange, notify]);
 
   const handleAddSubtitle = useCallback(() => {
     const current = subtitlesRef.current;
@@ -431,6 +441,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
                   onUpdate={handleUpdate}
                   onDelete={handleDelete}
                   onJumpTo={onJumpTo}
+                  onSplit={handleSplit}
                 />
               </div>
             )}

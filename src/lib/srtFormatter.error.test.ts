@@ -91,7 +91,8 @@ function testErrorHandling() {
   const invalidChunkMerge = mergeChunkSubtitles([
     { chunkStartTime: NaN, subtitles: [{ id: '1', startTime: 1.0, endTime: 3.0, originalText: 'A', translatedText: 'A' }] }
   ]);
-  console.assert(isNaN(invalidChunkMerge[0]?.startTime) || invalidChunkMerge[0]?.startTime === 1.0, 'NaN chunkStartTime should not break merge');
+  // NaN is falsy, so the offset falls back to 0 — timestamps stay exact.
+  console.assert(invalidChunkMerge[0]?.startTime === 1.0 && invalidChunkMerge[0]?.endTime === 3.0, 'NaN chunkStartTime must fall back to offset 0, keeping timestamps exact');
 
   console.log('✅ srtFormatter error handling tests passed successfully!');
 }

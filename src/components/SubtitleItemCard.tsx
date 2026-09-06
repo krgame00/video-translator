@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { SubtitleItem } from '@/lib/types';
-import { Play, Trash2, Clock } from 'lucide-react';
+import { Play, Trash2, Clock, Scissors } from 'lucide-react';
 
 interface SubtitleItemCardProps {
   item: SubtitleItem;
@@ -10,6 +10,7 @@ interface SubtitleItemCardProps {
   onUpdate: (updatedItem: SubtitleItem) => void;
   onDelete: (id: string) => void;
   onJumpTo: (time: number) => void;
+  onSplit?: (id: string) => void;
 }
 
 /**
@@ -22,6 +23,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
   onUpdate,
   onDelete,
   onJumpTo,
+  onSplit,
 }) {
   return (
     <div
@@ -75,15 +77,27 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
           </div>
         </div>
 
-        {/* Delete Button (Always visible on touch, hover on desktop) */}
-        <button
-          onClick={() => onDelete(item.id)}
-          className="p-2.5 rounded-lg text-zinc-400 sm:text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-all shrink-0"
-          title="Delete subtitle"
-          aria-label="Delete subtitle"
-        >
-          <Trash2 className="w-4 h-4" />
-        </button>
+        {/* Split + Delete Buttons (Always visible on touch, hover on desktop) */}
+        <div className="flex items-center gap-1 shrink-0">
+          {onSplit && item.endTime - item.startTime >= 1.0 && (
+            <button
+              onClick={() => onSplit(item.id)}
+              className="p-2.5 rounded-lg text-zinc-400 sm:text-zinc-500 hover:text-blue-400 hover:bg-blue-500/10 transition-all"
+              title="แบ่งซับเป็นสองท่อน (ตัดที่ขอบคำ)"
+              aria-label="Split subtitle into two cues"
+            >
+              <Scissors className="w-4 h-4" />
+            </button>
+          )}
+          <button
+            onClick={() => onDelete(item.id)}
+            className="p-2.5 rounded-lg text-zinc-400 sm:text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-all"
+            title="Delete subtitle"
+            aria-label="Delete subtitle"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* Text Editing Inputs — 16px on touch so iOS does not auto-zoom */}

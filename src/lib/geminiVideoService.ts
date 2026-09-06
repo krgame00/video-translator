@@ -78,6 +78,7 @@ async function attachWordTimings(
       let state = await ai.files.get({ name: uploaded.name });
       while (state.state === 'PROCESSING') {
         if (Date.now() > deadline) throw new Error('Word-timing file processing timed out.');
+        if (signal?.aborted) throw new Error('Client disconnected during word-timing processing.');
         await new Promise((resolve) => setTimeout(resolve, 1000));
         state = await ai.files.get({ name: uploaded.name });
       }
@@ -201,6 +202,7 @@ export async function processVideoSubtitlesFromStream(
             if (Date.now() > processingDeadline) {
               throw new Error('Gemini file processing timed out after 5 minutes.');
             }
+            if (signal?.aborted) throw new Error('Client disconnected during Gemini file processing.');
             await new Promise((resolve) => setTimeout(resolve, 1000));
             fileState = await ai.files.get({ name: fileNameOnGemini });
           }
@@ -458,6 +460,10 @@ ${JSON.stringify(subtitles, null, 2)}`;
             ai.files.delete({ name: uploadedFile.name }).catch(() => {});
           }
 
+          // Client disconnected: stop immediately. Without this, every
+          // remaining key×model retries with a FULL media re-upload.
+          if (signal?.aborted) throw err;
+
           // Continue to the next key/model on every failure (retryable or not)
           // so a permanent error on one model cannot kill the whole pipeline.
         }
@@ -477,21 +483,7 @@ ${JSON.stringify(subtitles, null, 2)}`;
   throw lastError || new Error('All API keys and Gemini models failed or exceeded quota.');
 }
 
-// Backward compatibility helper using Buffer
-export async function processVideoSubtitles(
-  fileBuffer: Buffer,
-  mimeType: string,
-  fileName: string,
-  targetLanguage: string = 'th'
-): Promise<SubtitleItem[]> {
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(new Uint8Array(fileBuffer));
-      controller.close();
-    },
-  });
-  return processVideoSubtitlesFromStream(stream, mimeType, fileName, targetLanguage);
-}
+// Backward compatibility helper using Buffer — no remaining callers; removed.
 
 /**
  * Read the real duration (seconds) of a 16-bit PCM WAV file from its RIFF header.

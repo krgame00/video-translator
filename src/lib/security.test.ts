@@ -5,6 +5,7 @@ import {
   generateUploadId,
   resolveTempPath,
   sanitizeStyle,
+  sanitizePrepareOptions,
   readJsonBody,
   createRateLimiter,
   isAllowedUploadFileName,
@@ -44,6 +45,28 @@ function testResolveTempPath() {
   threw = false;
   try { resolveTempPath('..\\hs_file.json'); } catch { threw = true; }
   console.assert(threw, 'windows traversal must be rejected');
+}
+
+function testSanitizePrepareOptions() {
+  const def = sanitizePrepareOptions(undefined);
+  console.assert(def.karaoke === false && def.playResX === undefined, 'undefined input → karaoke off, no dims');
+
+  const full = sanitizePrepareOptions({
+    playResX: 1080,
+    playResY: 1920,
+    karaoke: true,
+    highlightColor: 'ffff00',
+  });
+  console.assert(full.playResX === 1080 && full.playResY === 1920, 'valid dims accepted');
+  console.assert(full.karaoke === true, 'karaoke true accepted');
+  console.assert(full.highlightColor === 'FFFF00', 'highlightColor normalized to uppercase hex');
+
+  const clamped = sanitizePrepareOptions({ playResX: 5, playResY: 99999 });
+  console.assert(clamped.playResX === 100 && clamped.playResY === 8000, 'dims clamp to [100, 8000]');
+
+  const evil = sanitizePrepareOptions({ karaoke: 'yes', highlightColor: 'DROP TABLE' });
+  console.assert(evil.karaoke === false, 'non-boolean karaoke coerces to false');
+  console.assert(evil.highlightColor === undefined, 'non-hex highlightColor rejected');
 }
 
 function testSanitizeStyle() {
@@ -140,6 +163,7 @@ async function testSecurity() {
   testGeneratedIdEntropy();
   testResolveTempPath();
   testSanitizeStyle();
+  testSanitizePrepareOptions();
   testAllowedUploadFileNames();
   await testReadJsonBody();
   testRateLimiter();

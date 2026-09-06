@@ -119,13 +119,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // 288 base (NOT the video's real height — that made portrait text tiny).
   const scaledFontSize = Math.max(12, Math.round((style.fontSize * frameH) / ASS_BASE_PLAY_RES_Y));
 
-  // Position: real px from the frame edge (marginV), middle = centered
+  // Position: margin scaled exactly like the burn (burn: marginV × playResY/288
+  // rendered onto a frame of height playResY → on-screen px = marginV × frameH/288)
+  const marginPx = Math.round((style.marginV * frameH) / ASS_BASE_PLAY_RES_Y);
   const overlayPositionStyle: React.CSSProperties =
     style.position === 'top'
-      ? { top: style.marginV }
+      ? { top: marginPx }
       : style.position === 'middle'
         ? { top: '50%', transform: 'translateY(-50%)' }
-        : { bottom: style.marginV };
+        : { bottom: marginPx };
 
   // Box (borderStyle 4) vs outline (1) — matching the ASS BackColour/Outline
   const bgStyle: React.CSSProperties =
@@ -144,6 +146,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   })();
 
   const textColor = `#${style.primaryColor}`;
+  // Karaoke colors mirror the burn's Karaoke style: sung words sweep to the
+  // highlight color, unsung words stay at the base text color.
+  const highlightColor = `#${style.highlightColor || style.primaryColor}`;
 
   return (
     <div
@@ -290,7 +295,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   activeSubtitle.words.map((w, i) => (
                     <span
                       key={`${w.start}-${i}`}
-                      style={{ color: i <= activeWordIdx ? textColor : '#FFFFFF' }}
+                      style={{ color: i <= activeWordIdx ? highlightColor : textColor }}
                     >
                       {w.text}
                     </span>

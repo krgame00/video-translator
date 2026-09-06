@@ -152,6 +152,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           playResX,
           playResY,
           karaoke,
+          highlightColor: karaoke ? style.highlightColor : undefined,
           style: {
             fontSize: style.fontSize,
             primaryColor: style.primaryColor,
@@ -231,6 +232,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         pollIntervalRef.current = setInterval(async () => {
           try {
             const statusRes = await fetch(`/api/export-hardsub?action=status&jobId=${jobId}`);
+            if (statusRes.status === 404) {
+              // Job vanished (server restart / swept) — fail fast instead of
+              // spinning until the 20-minute timeout.
+              stopPolling();
+              reject(new Error('ไม่พบงาน export บนเซิร์ฟเวอร์ (อาจถูกรีสตาร์ท) — ลองใหม่อีกครั้ง'));
+              return;
+            }
             if (!statusRes.ok) return;
 
             const statusData = await statusRes.json();
@@ -430,19 +438,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </label>
                 {karaoke && (
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] text-zinc-400">สีไฮไลต์:</span>
+                    <span className="text-[10px] text-zinc-400 shrink-0">สีคำที่ร้องแล้ว:</span>
                     {COLOR_OPTIONS.map((col) => (
                       <button
                         key={col}
-                        onClick={() => onStyleChange({ ...style, primaryColor: col })}
+                        onClick={() => onStyleChange({ ...style, highlightColor: col })}
                         style={{ backgroundColor: `#${col}` }}
-                        aria-label={`Highlight color ${col}`}
+                        aria-label={`Karaoke highlight color ${col}`}
                         className={`w-4 h-4 rounded-full border border-white/20 transition-transform ${
-                          style.primaryColor === col ? 'scale-125 ring-2 ring-amber-400' : 'hover:scale-110'
+                          style.highlightColor === col ? 'scale-125 ring-2 ring-amber-400' : 'hover:scale-110'
                         }`}
                       />
                     ))}
-                    <span className="text-[9px] text-zinc-500 ml-1">(ยังไม่ถูกเลือก = ใช้สีข้อความ)</span>
                   </div>
                 )}
               </div>

@@ -272,7 +272,6 @@ export async function POST(req: NextRequest) {
         subPath,
         outPath,
         createdAt: Date.now(),
-        style,
         duration: typeof body.duration === 'number' && body.duration > 0 ? body.duration : undefined,
         playResX,
         playResY,
@@ -307,6 +306,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           { success: false, error: 'Invalid or expired export jobId.' },
           { status: 404 }
+        );
+      }
+
+      // Only accept video for a fresh job — a retry/double-submit during an
+      // active encode would truncate inPath and spawn a second FFmpeg.
+      if (job.status !== 'uploading') {
+        return NextResponse.json(
+          { success: false, error: `Job is already ${job.status}; start a new export.` },
+          { status: 409 }
         );
       }
 
@@ -366,6 +374,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           { success: false, error: 'Invalid or expired export jobId.' },
           { status: 404 }
+        );
+      }
+
+      if (job.status !== 'uploading') {
+        return NextResponse.json(
+          { success: false, error: `Job is already ${job.status}; start a new export.` },
+          { status: 409 }
         );
       }
 
