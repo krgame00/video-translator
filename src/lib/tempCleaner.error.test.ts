@@ -8,16 +8,25 @@ function testErrorHandling() {
   const now = Date.now();
   const twoHoursAgo = now - 2 * 3600 * 1000;
 
-  // Test 1: Non-existent directory (should not throw, return 0).
-  // getTempRoot() honours TEMP_DIR, so point it at a missing path.
+  // Test 1: an isolated TEMP_DIR containing one expired file must sweep
+  // exactly that file (getTempRoot honours TEMP_DIR; it falls back to the OS
+  // temp when the dir is missing, so the test creates a real one).
   const prevTempDir = process.env.TEMP_DIR;
+  const isolatedDir = path.join(tempDir, `isolated_temp_${now}`);
   try {
-    process.env.TEMP_DIR = path.join(tempDir, `missing_dir_${now}`);
+    fs.mkdirSync(isolatedDir, { recursive: true });
+    const expiredFile = path.join(isolatedDir, `hs_test_isolated_${now}.srt`);
+    fs.writeFileSync(expiredFile, 'expired');
+    fs.utimesSync(expiredFile, twoHoursAgo / 1000, twoHoursAgo / 1000);
+
+    process.env.TEMP_DIR = isolatedDir;
     const deleted = cleanExpiredTempFiles(3600 * 1000);
-    console.assert(deleted === 0, `Non-existent temp dir should delete nothing (got ${deleted})`);
+    console.assert(deleted === 1, `isolated dir sweep should delete exactly 1 file (got ${deleted})`);
+    console.assert(!fs.existsSync(expiredFile), 'expired file in isolated dir must be removed');
   } finally {
     if (prevTempDir === undefined) delete process.env.TEMP_DIR;
     else process.env.TEMP_DIR = prevTempDir;
+    fs.rmSync(isolatedDir, { recursive: true, force: true });
   }
 
   // Test 2: Files with permission errors (simulate by creating read-only file on Windows not easy, skip)

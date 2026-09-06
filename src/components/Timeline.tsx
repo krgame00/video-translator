@@ -13,6 +13,9 @@ interface TimelineProps {
   onUpdateSub?: (id: string, patch: Partial<Pick<SubtitleItem, 'startTime' | 'endTime'>>) => void;
   onDragStart?: () => void;
   onDecodeError?: () => void;
+  /** Waveform peaks computed during audio extraction — when present, skips
+   *  the full file re-read + decode entirely (big RAM/CPU saving). */
+  sharedPeaks?: number[];
 }
 
 type GestureMode = 'move' | 'resizeStart' | 'resizeEnd';
@@ -35,6 +38,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onUpdateSub,
   onDragStart,
   onDecodeError,
+  sharedPeaks,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -49,8 +53,16 @@ export const Timeline: React.FC<TimelineProps> = ({
   const onDecodeErrorRef = useRef(onDecodeError);
   useEffect(() => { onDecodeErrorRef.current = onDecodeError; }, [onDecodeError]);
 
-  // Decode audio amplitude peaks (single pass, reused for draws)
+  // Waveform peaks: reuse the shared extraction peaks when available (zero
+  // extra decode), otherwise fall back to decoding the file once locally.
   useEffect(() => {
+    if (sharedPeaks && sharedPeaks.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPeaks(sharedPeaks);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setIsDecoding(false);
+      return;
+    }
     if (!selectedFile) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setPeaks([]);
@@ -108,7 +120,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     return () => {
       isSubscribed = false;
     };
-  }, [selectedFile]);
+  }, [selectedFile, sharedPeaks]);
 
   // HiDPI-aware canvas sizing: the backing store follows the wrapper's CSS
   // size × devicePixelRatio (capped at 2) and re-renders on window resizes.

@@ -7,8 +7,7 @@ import { SubtitleEditor } from '@/components/SubtitleEditor';
 import { ExportModal } from '@/components/ExportModal';
 import { Upload, Download, Languages, Video, AlertCircle, Clock, XCircle, RotateCcw, HelpCircle, Film, Sparkles, Undo2, Redo2, FileText, MicVocal } from 'lucide-react';
 
-import { extractAudioChunks, AudioChunk } from '@/lib/audioExtractor';
-import { mergeChunkSubtitles } from '@/lib/srtFormatter';
+import { extractAudioChunks, AudioChunk } from '@/lib/audioExtractor';import { mergeChunkSubtitles } from '@/lib/srtFormatter';
 import { findActiveSubtitle } from '@/lib/subtitleUtils';
 import { appReducer, initialState } from '@/lib/appReducer';
 import { SubtitleItem } from '@/lib/types';
@@ -32,6 +31,9 @@ export default function Home() {
   const [subStyle, setSubStyle] = useState<SubtitleStyleSettings>(DEFAULT_SUBTITLE_STYLE);
   // Karaoke word-highlight generation (opt-in, costs one extra AI pass/chunk)
   const [karaokeEnabled, setKaraokeEnabled] = useState(false);
+  // Waveform peaks computed during audio extraction — the Timeline reuses
+  // them instead of re-reading and re-decoding the whole file a second time.
+  const [waveformPeaks, setWaveformPeaks] = useState<number[]>([]);
 
   const subtitlesRef = useRef(subtitles);
   useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
@@ -168,6 +170,7 @@ export default function Home() {
     tempVid.src = url;
     tempVid.onloadedmetadata = () => {
       const dur = tempVid.duration || 0;
+      setWaveformPeaks([]);
       dispatch({
         type: 'SET_FILE',
         payload: {
@@ -219,7 +222,8 @@ export default function Home() {
     dispatch({ type: 'SET_TOAST', payload: { msg: 'Starting AI translation…', type: 'info' } });
 
     try {
-      const chunks = await extractAudioChunks(selectedFile, 300);
+      const { chunks, peaks: extractedPeaks } = await extractAudioChunks(selectedFile, 300);
+      setWaveformPeaks(extractedPeaks);
       console.log(`[Audio Chunker] Total chunks created: ${chunks.length}`);
 
       if (chunks.length > 1) {
@@ -579,7 +583,7 @@ export default function Home() {
               </div>
             </div>
             {selectedFile && (
-              <Timeline selectedFile={selectedFile} currentTime={currentTime} duration={videoDuration} subtitles={subtitles} onSeek={handleJumpToTime} activeId={activeSubtitle?.id ?? null} onUpdateSub={handleTimelineUpdateSub} onDragStart={pushHistory} onDecodeError={() => showToast('ไม่สามารถถอดรหัสเสียงสำหรับ waveform ได้ (ไฟล์อาจใหญ่เกินหรือ codec ไม่รองรับ) — Timeline ยังใช้งานได้ปกติ', 'info')} />
+              <Timeline selectedFile={selectedFile} currentTime={currentTime} duration={videoDuration} subtitles={subtitles} onSeek={handleJumpToTime} activeId={activeSubtitle?.id ?? null} onUpdateSub={handleTimelineUpdateSub} onDragStart={pushHistory} sharedPeaks={waveformPeaks} onDecodeError={() => showToast('ไม่สามารถถอดรหัสเสียงสำหรับ waveform ได้ (ไฟล์อาจใหญ่เกินหรือ codec ไม่รองรับ) — Timeline ยังใช้งานได้ปกติ', 'info')} />
             )}
           </div>
         )}

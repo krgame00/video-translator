@@ -49,14 +49,15 @@ const WORD_TIMING_SCHEMA = {
 };
 
 /**
- * Optional second pass for karaoke: re-listens to the same audio and asks
- * Gemini for per-word timings inside each cue. Any cue whose timings fail
- * validation falls back to character-proportional distribution, so the
- * highlight degrades smoothly instead of breaking.
+ * Optional second pass for karaoke: re-listens to the SAME uploaded file and
+ * asks Gemini for per-word timings inside each cue (no re-upload — the file
+ * is already processed server-side). Any cue whose timings fail validation
+ * falls back to character-proportional distribution, so the highlight
+ * degrades smoothly instead of breaking.
  */
 async function attachWordTimings(
   ai: GoogleGenAI,
-  filePath: string,
+  uploaded: { name: string; uri: string },
   mimeType: string,
   subtitles: SubtitleItem[],
   signal?: AbortSignal
@@ -67,62 +68,70 @@ async function attachWordTimings(
       words: distributeWordsByChars(cue.translatedText, cue.startTime, cue.endTime),
     }));
 
-    const uploaded = await ai.files.upload({
-      file: filePath,
-      config: { mimeType, displayName: `word_timing_${Date.now()}` },
-    });
-    if (!uploaded.name || !uploaded.uri) throw new Error('Word-timing file upload failed.');
+    const cueList = subtitles.map((c) => ({
+      id: c.id,
+      cueStart: c.startTime,
+      cueEnd: c.endTime,
+      text: c.translatedText,
+    }));
+    if (cueList.length === 0) return fallback;
 
-    try {
-      const deadline = Date.now() + 5 * 60 * 1000;
-      let state = await ai.files.get({ name: uploaded.name });
-      while (state.state === 'PROCESSING') {
-        if (Date.now() > deadline) throw new Error('Word-timing file processing timed out.');
-        if (signal?.aborted) throw new Error('Client disconnected during word-timing processing.');
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        state = await ai.files.get({ name: uploaded.name });
-      }
-      if (state.state === 'FAILED') throw new Error('Word-timing file processing failed.');
-
-      const cueList = subtitles.map((c) => ({
-        id: c.id,
-        cueStart: c.startTime,
-        cueEnd: c.endTime,
-        text: c.translatedText,
-      }));
-      if (cueList.length === 0) return fallback;
-
-      const raw = await requestJSON<GeminiRawWordTiming[]>({
-        prompt: `You are a precise speech-to-word-timing aligner. Listen to the audio and assign the exact spoken time range for each word of each subtitle cue.
+    const prompt = `You are a precise speech-to-word-timing aligner. Listen to the audio and assign the exact spoken time range for each word of each subtitle cue.
 
 For every cue below, split its text into the words that are actually SPOKEN and give the instant each word starts and finishes ("HH:MM:SS.mmm"). Word times must stay inside the cue's [cueStart, cueEnd] range and be in chronological order. Preserve the cue id exactly.
 
 Cues:
-${JSON.stringify(cueList)}`,
-        schema: WORD_TIMING_SCHEMA,
-        signal,
-      });
+${JSON.stringify(cueList)}`;
 
-      const byId = new Map<string, GeminiRawWordTiming['words']>();
-      for (const item of raw || []) {
-        if (item && item.id) byId.set(item.id, item.words || []);
+    // The pass must actually LISTEN to the audio (fileData attachment) —
+    // text-only guessing produced fictional timings. Tries models in quota
+    // order; any failure falls through to proportional distribution.
+    let raw: GeminiRawWordTiming[] | null = null;
+    let lastErr: unknown = null;
+    for (const modelName of MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [
+            { fileData: { fileUri: uploaded.uri, mimeType } },
+            prompt,
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: WORD_TIMING_SCHEMA,
+            abortSignal: signal,
+          },
+        });
+        const responseText = response.text;
+        if (!responseText) throw new Error('Gemini returned an empty word-timing response.');
+        const parsed = parsePartialOrTruncatedJSON(responseText) as GeminiRawWordTiming[] | null;
+        if (!Array.isArray(parsed)) throw new Error('Could not parse word-timing JSON.');
+        raw = parsed;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (signal?.aborted) break;
       }
-
-      return subtitles.map((cue) => {
-        const rawWords = byId.get(cue.id) || [];
-        const parsed: WordTiming[] = rawWords.map((w) => ({
-          text: String(w.text || ''),
-          start: parseTimestampToSeconds(w.startTime),
-          end: parseTimestampToSeconds(w.endTime),
-        }));
-        if (validateWordTimings(parsed, cue.startTime, cue.endTime)) {
-          return { ...cue, words: interpolateWords(parsed, cue.startTime, cue.endTime) };
-        }
-        return { ...cue, words: distributeWordsByChars(cue.translatedText, cue.startTime, cue.endTime) };
-      });
-    } finally {
-      ai.files.delete({ name: uploaded.name }).catch(() => {});
     }
+    if (!raw) throw lastErr ?? new Error('Word-timing alignment failed on every model.');
+
+    const byId = new Map<string, GeminiRawWordTiming['words']>();
+    for (const item of raw || []) {
+      if (item && item.id) byId.set(item.id, item.words || []);
+    }
+
+    return subtitles.map((cue) => {
+      const rawWords = byId.get(cue.id) || [];
+      const parsed: WordTiming[] = rawWords.map((w) => ({
+        text: String(w.text || ''),
+        start: parseTimestampToSeconds(w.startTime),
+        end: parseTimestampToSeconds(w.endTime),
+      }));
+      if (validateWordTimings(parsed, cue.startTime, cue.endTime)) {
+        return { ...cue, words: interpolateWords(parsed, cue.startTime, cue.endTime) };
+      }
+      return { ...cue, words: distributeWordsByChars(cue.translatedText, cue.startTime, cue.endTime) };
+    });
   } catch (err) {
     console.warn('[Word Timing] Pass failed, falling back to proportional distribution:', err);
     return subtitles.map((cue) => ({
@@ -437,10 +446,17 @@ ${JSON.stringify(subtitles, null, 2)}`;
             }
           }
 
-          // Optional karaoke pass: per-word timings (never fails the request —
-          // falls back to proportional distribution internally)
+          // Optional karaoke pass: per-word timings, reusing the SAME uploaded
+          // file (no re-upload, no second processing wait). Never fails the
+          // request — falls back to proportional distribution internally.
           if (wordTiming && subtitles.length > 0) {
-            subtitles = await attachWordTimings(ai, tempFilePath, mimeType, subtitles, signal);
+            subtitles = await attachWordTimings(
+              ai,
+              { name: uploadedFile.name, uri: uploadedFile.uri },
+              mimeType,
+              subtitles,
+              signal
+            );
           }
 
           // Clean up remote file asynchronously

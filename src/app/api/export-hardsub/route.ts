@@ -28,6 +28,26 @@ const prepareLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
 /** Running FFmpeg encoders, so cancel requests can kill the process. */
 const activeEncodes = new Map<string, ChildProcess>();
 
+// Encode one job at a time: FFmpeg spawns saturate every core, so parallel
+// jobs make the whole machine (including other requests) unusable. Queued
+// jobs keep status 'encoding' with their initial progress until their turn.
+const MAX_CONCURRENT_ENCODERS = 1;
+const pendingEncodes: string[] = [];
+
+function scheduleEncode(jobId: string): void {
+  if (activeEncodes.size >= MAX_CONCURRENT_ENCODERS) {
+    pendingEncodes.push(jobId);
+    console.log(`[FFmpeg Hardsub] Queued ${jobId} (${pendingEncodes.length} waiting)`);
+    return;
+  }
+  void runFFmpegEncoding(jobId);
+}
+
+function onEncodeFinished(): void {
+  const next = pendingEncodes.shift();
+  if (next) void runFFmpegEncoding(next);
+}
+
 export const maxDuration = 300; // 5 minutes max execution per step
 
 function getJobFilePath(jobId: string): string {
@@ -210,6 +230,7 @@ async function runFFmpegEncoding(jobId: string) {
     } catch {}
   } finally {
     activeEncodes.delete(jobId);
+    onEncodeFinished();
   }
 }
 
@@ -338,7 +359,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Launch non-blocking async background encoding
-      void runFFmpegEncoding(jobId);
+      scheduleEncode(jobId);
 
       return NextResponse.json({ success: true, status: 'encoding' });
     } catch (err: unknown) {
@@ -414,7 +435,7 @@ export async function POST(req: NextRequest) {
       try { await fs.promises.unlink(rawPath); } catch {}
       try { await fs.promises.unlink(sessionPath); } catch {}
 
-      void runFFmpegEncoding(jobId);
+      scheduleEncode(jobId);
 
       return NextResponse.json({ success: true, status: 'encoding' });
     } catch (err: unknown) {
