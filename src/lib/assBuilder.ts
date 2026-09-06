@@ -50,19 +50,96 @@ function escapeAssText(text: string): string {
     .replace(/\r?\n/g, '\\N');
 }
 
-/** Builds one Dialogue line's Text field (karaoke \k when words are present). */
-function buildDialogueText(item: SubtitleItem, karaoke: boolean): string {
-  const text = (item.translatedText || '').trim();
-  if (!karaoke || !Array.isArray(item.words) || item.words.length === 0) {
-    return escapeAssText(text);
+/** Thai combining marks (vowels/tones above & below) take no horizontal space. */
+const THAI_ZERO_WIDTH = /[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]/g;
+
+/** Estimated Itim glyph advance per spacing character as a fraction of Fontsize
+ *  (measured ~0.33 on burned frames; 0.42 adds a safety margin). */
+const THAI_AVANCE_RATIO = 0.42;
+
+const unitOf = (s: string) => s.replace(THAI_ZERO_WIDTH, '').length;
+
+/**
+ * Pre-wraps text into \N-ready lines at Thai/Latin word boundaries while
+ * preserving every original separator (spaces, punctuation). libass cannot
+ * wrap space-less Thai by itself, so without this long cues overflow the
+ * frame horizontally on portrait videos.
+ */
+function wrapAssLines(text: string, maxUnitsPerLine: number): string[] {
+  if (maxUnitsPerLine <= 0 || !text) return [text];
+
+  let parts: string[];
+  try {
+    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+      // granularity 'word' keeps whitespace/punctuation as their own segments
+      parts = Array.from(new Intl.Segmenter('th', { granularity: 'word' }).segment(text))
+        .map((s) => s.segment);
+    } else {
+      parts = text.split(/(\s+)/).filter((p) => p.length > 0);
+    }
+  } catch {
+    parts = [text];
   }
-  // \k durations are centiseconds; the fill sweeps Secondary→Primary.
-  return item.words
-    .map((w) => {
-      const cs = Math.max(1, Math.round((w.end - w.start) * 100));
-      return `{\\k${cs}}${escapeAssText(w.text)}`;
-    })
-    .join('');
+
+  const lines: string[] = [];
+  let cur = '';
+  for (const part of parts) {
+    if (/^\s+$/.test(part)) {
+      if (cur) cur += part; // inner separator; dropped if it ends up trailing
+      continue;
+    }
+    if (cur && unitOf(cur) + unitOf(part) > maxUnitsPerLine) {
+      lines.push(cur.trimEnd());
+      cur = part;
+    } else {
+      cur += part;
+    }
+  }
+  if (cur.trim()) lines.push(cur.trimEnd());
+  return lines.length > 0 ? lines : [text];
+}
+
+/** Builds one Dialogue line's Text field (karaoke \k when words are present). */
+function buildDialogueText(
+  item: SubtitleItem,
+  karaoke: boolean,
+  maxUnitsPerLine: number
+): string {
+  const text = (item.translatedText || '').trim();
+  const unitOf = (s: string) => s.replace(THAI_ZERO_WIDTH, '').length;
+
+  // Karaoke: group word spans into wrapped lines with the same unit budget,
+  // emitting {\k} per word and \N between lines. Latin words get a trailing
+  // space inside their span so spaced languages don't concatenate.
+  if (karaoke && Array.isArray(item.words) && item.words.length > 0) {
+    const lines: { text: string; cs: number }[][] = [];
+    let cur: { text: string; cs: number }[] = [];
+    let curUnits = 0;
+    for (const w of item.words) {
+      const u = unitOf(w.text);
+      if (cur.length && curUnits + u > maxUnitsPerLine) {
+        lines.push(cur);
+        cur = [];
+        curUnits = 0;
+      }
+      cur.push({ text: w.text, cs: Math.max(1, Math.round((w.end - w.start) * 100)) });
+      curUnits += u;
+    }
+    if (cur.length) lines.push(cur);
+    return lines
+      .map((line) =>
+        line
+          .map((w) => {
+            const sep = /[A-Za-z0-9]$/.test(w.text) ? ' ' : '';
+            return `{\\k${w.cs}}${escapeAssText(w.text)}${sep}`;
+          })
+          .join('')
+      )
+      .join('\\N');
+  }
+
+  const wrapped = wrapAssLines(text, maxUnitsPerLine);
+  return wrapped.map(escapeAssText).join('\\N');
 }
 
 /**
@@ -87,12 +164,19 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
   const back = style.borderStyle === 4 ? '&H80000000' : '&HFF000000';
   const borderStyle = style.borderStyle === 4 ? 4 : 1;
 
+  // Line-budget: spacing characters per wrapped line, from the real frame
+  // width minus scaled side margins (Thai glyph ≈ 0.58 × Fontsize wide).
+  const usableWidth = playResX - 2 * marginLR;
+  const maxUnitsPerLine = Math.max(6, Math.floor(usableWidth / (fontsize * THAI_AVANCE_RATIO)));
+
   const header = [
     '[Script Info]',
     'ScriptType: v4.00+',
     `PlayResX: ${playResX}`,
     `PlayResY: ${playResY}`,
-    'WrapStyle: 2',
+    // 0 = smart wrapping: long lines fold to 2 lines inside the margins
+    // instead of overflowing the frame width (critical on portrait videos)
+    'WrapStyle: 0',
     'ScaledBorderAndShadow: yes',
   ].join('\r\n');
 
@@ -107,7 +191,7 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
     ...subtitles.map(
       (item) =>
-        `Dialogue: 0,${formatAssTime(item.startTime)},${formatAssTime(item.endTime)},Default,,0,0,0,,${buildDialogueText(item, !!opts.karaoke)}`
+        `Dialogue: 0,${formatAssTime(item.startTime)},${formatAssTime(item.endTime)},Default,,0,0,0,,${buildDialogueText(item, !!opts.karaoke, maxUnitsPerLine)}`
     ),
   ].join('\r\n');
 

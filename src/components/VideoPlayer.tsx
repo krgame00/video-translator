@@ -8,6 +8,7 @@ import {
   COLOR_OPTIONS,
   FONT_SIZE_OPTIONS,
 } from '@/lib/subtitleStyle';
+import { ASS_BASE_PLAY_RES_Y } from '@/lib/assBuilder';
 import { Settings, Type } from 'lucide-react';
 
 interface VideoPlayerProps {
@@ -38,8 +39,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Intrinsic aspect (w/h) of the loaded media — portrait videos get a tall
   // frame instead of being letterboxed into a 16:9 sliver.
   const [videoAspect, setVideoAspect] = useState<number | null>(null);
-  // Real pixel height of the media (libass sizes fonts against it).
-  const [videoHeight, setVideoHeight] = useState<number | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -67,7 +66,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   if (prevUrl !== videoUrl) {
     setPrevUrl(videoUrl);
     setVideoAspect(null);
-    setVideoHeight(null);
   }
 
   // Keyboard shortcuts (Space = play/pause, Left = -5s, Right = +5s).
@@ -116,10 +114,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Find currently active subtitle (binary search; list is sorted by time)
   const activeSubtitle = findActiveSubtitle(subtitles, currentTime);
 
-  // Font size mirrors the hardsub burn: libass sizes `Fontsize` against the
-  // video's real pixel height; we scale by the same ratio onto the frame.
-  const scaleBase = videoHeight || 288;
-  const scaledFontSize = Math.max(12, Math.round((style.fontSize * frameH) / scaleBase));
+  // Font size mirrors the hardsub burn: libass sizes `Fontsize` against
+  // PlayResY=288 and scales up to the frame, so the preview uses the same
+  // 288 base (NOT the video's real height — that made portrait text tiny).
+  const scaledFontSize = Math.max(12, Math.round((style.fontSize * frameH) / ASS_BASE_PLAY_RES_Y));
 
   // Position: real px from the frame edge (marginV), middle = centered
   const overlayPositionStyle: React.CSSProperties =
@@ -164,7 +162,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               const w = e.currentTarget.videoWidth;
               const h = e.currentTarget.videoHeight;
               if (w && h) setVideoAspect(w / h);
-              if (h) setVideoHeight(h);
             }}
             onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
             className="w-full h-full object-contain"
