@@ -4,7 +4,8 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SubtitleItem } from '@/lib/types';
 import { generateSRT, generateVTT, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
 import { uploadFileInChunks } from '@/lib/chunkedUploader';
-import { Download, FileText, X, Loader2, Clock, Zap, XCircle } from 'lucide-react';
+import { COLOR_OPTIONS, type SubtitleStyleSettings } from '@/lib/subtitleStyle';
+import { Download, FileText, X, Loader2, Clock, Zap, XCircle, Sparkles } from 'lucide-react';
 
 // Files above this size use chunked upload instead of a single-stream fetch
 // (avoids proxy payload limits / client memory pressure on very large videos).
@@ -20,6 +21,12 @@ interface ExportModalProps {
   selectedFile?: File | null;
   /** Media duration in seconds; enables real server-side encode progress. */
   duration?: number;
+  /** Real video dimensions (PlayRes) so the burn matches the preview. */
+  playResX?: number;
+  playResY?: number;
+  /** SHARED subtitle style — prefilled from the player and written back. */
+  style: SubtitleStyleSettings;
+  onStyleChange: (s: SubtitleStyleSettings) => void;
   notify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
@@ -30,15 +37,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   videoUrl,
   selectedFile,
   duration,
+  playResX,
+  playResY,
+  style,
+  onStyleChange,
   notify,
 }) => {
   const [isFFmpegExporting, setIsFFmpegExporting] = useState(false);
   const [ffmpegStatus, setFfmpegStatus] = useState('');
-
-  // Dynamic Styling States
-  const [fontSize, setFontSize] = useState(22);
-  const [primaryColor, setPrimaryColor] = useState('FFFFFF');
-  const [borderStyle, setBorderStyle] = useState(1); // 1 = Outline Only
+  // Karaoke burn is opt-in and only meaningful when word timings exist
+  const hasWordTimings = subtitles.some((s) => Array.isArray(s.words) && s.words.length > 0);
+  const [karaoke, setKaraoke] = useState(false);
 
   // Polling lifecycle refs (interval, hard timeout, active job id, and a
   // resolver that lets Cancel settle the in-flight polling promise cleanly).
@@ -140,10 +149,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         body: JSON.stringify({
           subtitles: cleanSubtitles,
           duration,
+          playResX,
+          playResY,
+          karaoke,
           style: {
-            fontSize,
-            primaryColor,
-            borderStyle,
+            fontSize: style.fontSize,
+            primaryColor: style.primaryColor,
+            borderStyle: style.borderStyle,
+            marginV: style.marginV,
+            position: style.position,
             fontName: 'Itim'
           }
         }),
@@ -321,10 +335,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <Download className="w-4 h-4 text-zinc-500 group-hover:text-purple-400 transition-colors" />
           </button>
 
-          {/* Dynamic Style Customization Section */}
+          {/* Dynamic Style Customization Section — SHARED with the player preview */}
           <div className="p-3.5 rounded-xl bg-[#09090e] border border-[#232334] space-y-3">
             <p className="text-xs font-semibold text-zinc-300 flex items-center justify-between">
               <span>Subtitle Hardsub Style (ตั้งค่าสไตล์ซับ)</span>
+              <span className="text-[10px] text-emerald-400 font-normal">synced with preview</span>
             </p>
 
             <div className="grid grid-cols-3 gap-2 text-xs">
@@ -332,13 +347,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               <div>
                 <label className="text-[10px] text-zinc-400 block mb-1">Font Size</label>
                 <select
-                  value={fontSize}
-                  onChange={(e) => setFontSize(Number(e.target.value))}
+                  value={style.fontSize}
+                  onChange={(e) => onStyleChange({ ...style, fontSize: Number(e.target.value) })}
                   className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
                 >
-                  <option value={18}>Small (18px)</option>
-                  <option value={22}>Normal (22px)</option>
-                  <option value={26}>Large (26px)</option>
+                  {[18, 22, 26].map((sz) => (
+                    <option key={sz} value={sz}>{sz}px</option>
+                  ))}
                 </select>
               </div>
 
@@ -346,13 +361,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               <div>
                 <label className="text-[10px] text-zinc-400 block mb-1">Text Color</label>
                 <select
-                  value={primaryColor}
-                  onChange={(e) => setPrimaryColor(e.target.value)}
+                  value={style.primaryColor}
+                  onChange={(e) => onStyleChange({ ...style, primaryColor: e.target.value })}
                   className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
                 >
-                  <option value="FFFFFF">White (ขาว)</option>
-                  <option value="FFFF00">Yellow (เหลือง)</option>
-                  <option value="00FFFF">Cyan (ฟ้า)</option>
+                  {COLOR_OPTIONS.map((col) => (
+                    <option key={col} value={col}>#{col}</option>
+                  ))}
                 </select>
               </div>
 
@@ -360,8 +375,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               <div>
                 <label className="text-[10px] text-zinc-400 block mb-1">Background</label>
                 <select
-                  value={borderStyle}
-                  onChange={(e) => setBorderStyle(Number(e.target.value))}
+                  value={style.borderStyle}
+                  onChange={(e) => onStyleChange({ ...style, borderStyle: Number(e.target.value) as 1 | 4 })}
                   className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
                 >
                   <option value={4}>Black Box (กล่อง)</option>
@@ -369,6 +384,69 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </select>
               </div>
             </div>
+
+            {/* Position + Margin (mirrors the player settings) */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div>
+                <label className="text-[10px] text-zinc-400 block mb-1">Position</label>
+                <select
+                  value={style.position}
+                  onChange={(e) => onStyleChange({ ...style, position: e.target.value as 'top' | 'middle' | 'bottom' })}
+                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs capitalize"
+                >
+                  <option value="bottom">Bottom (ล่าง)</option>
+                  <option value="middle">Middle (กลาง)</option>
+                  <option value="top">Top (บน)</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] text-zinc-400 block mb-1">Margin V: {style.marginV}</label>
+                <input
+                  type="range"
+                  min={10}
+                  max={120}
+                  step={2}
+                  value={style.marginV}
+                  onChange={(e) => onStyleChange({ ...style, marginV: Number(e.target.value) })}
+                  className="w-full accent-emerald-500"
+                />
+              </div>
+            </div>
+
+            {/* Karaoke (word-fill) burn option */}
+            {hasWordTimings && (
+              <div className="p-2.5 rounded-lg bg-[#050507] border border-amber-500/30 space-y-2">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span className="text-[11px] font-medium text-amber-300 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    คาราโอเกะ (ไฮไลต์ทีละคำ)
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={karaoke}
+                    onChange={(e) => setKaraoke(e.target.checked)}
+                    className="rounded border-zinc-600 bg-zinc-900 text-amber-500 focus:ring-0"
+                  />
+                </label>
+                {karaoke && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-zinc-400">สีไฮไลต์:</span>
+                    {COLOR_OPTIONS.map((col) => (
+                      <button
+                        key={col}
+                        onClick={() => onStyleChange({ ...style, primaryColor: col })}
+                        style={{ backgroundColor: `#${col}` }}
+                        aria-label={`Highlight color ${col}`}
+                        className={`w-4 h-4 rounded-full border border-white/20 transition-transform ${
+                          style.primaryColor === col ? 'scale-125 ring-2 ring-amber-400' : 'hover:scale-110'
+                        }`}
+                      />
+                    ))}
+                    <span className="text-[9px] text-zinc-500 ml-1">(ยังไม่ถูกเลือก = ใช้สีข้อความ)</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* FFmpeg Server-Side Hardsub Video Option */}

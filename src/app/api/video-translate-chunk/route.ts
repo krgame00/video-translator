@@ -24,6 +24,7 @@ export async function POST(req: NextRequest) {
     const targetLanguage = (formData.get('targetLanguage') as string) || 'th';
     const chunkIndex = parseInt((formData.get('chunkIndex') as string) || '0', 10);
     const chunkStartTime = parseFloat((formData.get('chunkStartTime') as string) || '0');
+    const wordTiming = formData.get('wordTiming') === '1';
 
     if (!Number.isFinite(chunkIndex) || !Number.isFinite(chunkStartTime)) {
       return NextResponse.json(
@@ -44,7 +45,8 @@ export async function POST(req: NextRequest) {
       file.type || 'audio/wav',
       file.name || `chunk_${chunkIndex}.wav`,
       targetLanguage,
-      req.signal
+      req.signal,
+      wordTiming
     );
 
     return NextResponse.json({

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SubtitleItem, ExportJob } from '@/lib/types';
-import { generateSRT } from '@/lib/srtFormatter';
+import { buildAss } from '@/lib/assBuilder';
 import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
 import { env } from '@/lib/env';
 import {
@@ -9,6 +9,7 @@ import {
   resolveTempPath,
   getTempRoot,
   sanitizeStyle,
+  sanitizePrepareOptions,
   MAX_UPLOAD_BYTES,
   HttpError,
   createRateLimiter,
@@ -59,7 +60,7 @@ function deleteJob(jobId: string): void {
   if (!isSafeJobId(jobId)) return;
   const job = loadJob(jobId);
   const tempFiles = job
-    ? [job.inPath, job.srtPath, job.outPath, getJobFilePath(jobId)]
+    ? [job.inPath, job.subPath, job.outPath, getJobFilePath(jobId)]
     : [getJobFilePath(jobId)];
 
   tempFiles.forEach((p) => {
@@ -67,6 +68,13 @@ function deleteJob(jobId: string): void {
       try { fs.unlinkSync(p); } catch {}
     }
   });
+  // Fonts dir is a directory, not a file
+  if (job) {
+    const fontsDir = path.join(getTempRoot(), `${jobId}_fonts`);
+    if (fs.existsSync(fontsDir)) {
+      try { fs.rmSync(fontsDir, { recursive: true, force: true }); } catch {}
+    }
+  }
 }
 
 async function runFFmpegEncoding(jobId: string) {
@@ -81,37 +89,35 @@ async function runFFmpegEncoding(jobId: string) {
 
     const tempDir = getTempRoot();
     const inFileName = `${jobId}_in.mp4`;
-    const srtFileName = `${jobId}.srt`;
+    const subFileName = `${jobId}.ass`;
+    const fontsDirName = `${jobId}_fonts`;
     const outFileName = `${jobId}_out.mp4`;
 
     const ffmpegBin = env.ffmpegPath || 'ffmpeg';
 
-    // Construct force_style string based on dynamic inputs (already whitelist-sanitized)
-    const style = job.style || {};
-    const fontName = style.fontName || 'Itim';
-    const fontSize = style.fontSize || 22;
-    const primaryColor = style.primaryColor || 'FFFFFF'; // White
-    const outlineColor = style.outlineColor || '000000'; // Black
-    const backColor = style.backColor || '000000';    // Dark background box
-    const borderStyle = style.borderStyle || 4; // default to back box border
-    const marginV = style.marginV || 30;
+    // Ship the Itim web font with the job so libass renders the SAME font as
+    // the web preview (system font lookup would silently substitute otherwise).
+    let fontsDirArg = '';
+    const repoFontsDir = path.join(process.cwd(), 'public', 'fonts');
+    if (fs.existsSync(repoFontsDir)) {
+      const jobFontsDir = path.join(tempDir, fontsDirName);
+      try {
+        fs.cpSync(repoFontsDir, jobFontsDir, { recursive: true });
+        fontsDirArg = `:fontsdir='${fontsDirName}'`;
+      } catch (e) {
+        console.warn('[FFmpeg Hardsub] Font copy failed, falling back to system fonts:', e);
+      }
+    }
 
-    // Transparent background if borderStyle is 1 (Outline only)
-    const effectiveBackColor = borderStyle === 1 ? '000000&HFF' : `&H80${backColor}`;
-
-    const forceStyle = `Fontname=${fontName},Fontsize=${fontSize},PrimaryColour=&H00${primaryColor},OutlineColour=&H00${outlineColor},BackColour=${effectiveBackColor},BorderStyle=${borderStyle},Outline=2,Shadow=0,MarginV=${marginV}`;
-
-    // Using ultra-fast preset for top speed + h.264 optimization.
-    // spawn with an args array (no shell) so no value can inject commands.
-    // `-progress pipe:1` emits machine-readable progress on stdout so the
-    // job's progress reflects real encode position instead of fake jumps.
+    // All styling lives inside the .ass file (PlayRes = real video dims),
+    // so no force_style overrides here — that would fight the embedded Style.
     const ffmpegArgs: string[] = [];
     if (env.ffmpegHwaccel) ffmpegArgs.push('-hwaccel', env.ffmpegHwaccel);
     ffmpegArgs.push('-progress', 'pipe:1', '-nostats');
     ffmpegArgs.push(
       '-y',
       '-i', inFileName,
-      '-vf', `subtitles='${srtFileName}':force_style='${forceStyle}'`,
+      '-vf', `ass='${subFileName}'${fontsDirArg}`,
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-profile:v', 'main',
@@ -217,9 +223,14 @@ export async function POST(req: NextRequest) {
         subtitles?: SubtitleItem[];
         style?: unknown;
         duration?: number;
+        playResX?: number;
+        playResY?: number;
+        karaoke?: boolean;
+        highlightColor?: string;
       };
       const subtitles: SubtitleItem[] = body.subtitles || [];
       const style = sanitizeStyle(body.style);
+      const burn = sanitizePrepareOptions(body);
 
       if (!subtitles || subtitles.length === 0) {
         return NextResponse.json(
@@ -230,24 +241,38 @@ export async function POST(req: NextRequest) {
 
       const id = generateJobId();
       const tempDir = getTempRoot();
-      const srtPath = path.join(tempDir, `${id}.srt`);
+      const subPath = path.join(tempDir, `${id}.ass`);
       const inPath = path.join(tempDir, `${id}_in.mp4`);
       const outPath = path.join(tempDir, `${id}_out.mp4`);
 
-      // Write clean SRT without BOM so FFmpeg srt demuxer reads line 1 cleanly
-      const srtContent = generateSRT(subtitles).replace(/^\uFEFF/, '');
-      fs.writeFileSync(srtPath, srtContent, 'utf8');
+      // Real video dimensions make libass PlayRes match the frame — the core
+      // of preview == burn (WYSIWYG). Sensible fallback for audio-only jobs.
+      const playResX = burn.playResX ?? 1920;
+      const playResY = burn.playResY ?? 1080;
+
+      const assContent = buildAss(subtitles, {
+        playResX,
+        playResY,
+        style,
+        karaoke: burn.karaoke,
+        highlightColor: burn.highlightColor,
+      });
+      fs.writeFileSync(subPath, assContent, 'utf8');
 
       const job: ExportJob = {
         id,
         status: 'uploading',
         progress: 0,
         inPath,
-        srtPath,
+        subPath,
         outPath,
         createdAt: Date.now(),
         style,
         duration: typeof body.duration === 'number' && body.duration > 0 ? body.duration : undefined,
+        playResX,
+        playResY,
+        karaoke: burn.karaoke,
+        highlightColor: burn.highlightColor,
       };
       saveJob(job);
 

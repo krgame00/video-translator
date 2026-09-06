@@ -20,6 +20,7 @@ export async function POST(req: NextRequest) {
     }
     const file = formData.get('file') as File | null;
     const targetLanguage = (formData.get('targetLanguage') as string) || 'th';
+    const wordTiming = formData.get('wordTiming') === '1';
 
     if (!file) {
       return NextResponse.json(
@@ -43,7 +44,8 @@ export async function POST(req: NextRequest) {
       file.type || 'video/mp4',
       file.name,
       targetLanguage,
-      req.signal
+      req.signal,
+      wordTiming
     );
 
     return NextResponse.json({

@@ -1,4 +1,5 @@
 import { SubtitleItem } from './types';
+import { segmentWords } from './srtFormatter';
 
 /**
  * Binary search for the subtitle active at time t (first item whose
@@ -85,7 +86,9 @@ export function findAndReplaceSubtitles(
 }
 
 /**
- * Splits a subtitle item at a specified split time (or mid point) into two adjacent items
+ * Splits a subtitle item at a specified split time (or mid point) into two adjacent items.
+ * Text is split at the word boundary nearest the proportional midpoint using
+ * Intl.Segmenter, so Thai text never gets cut mid-word.
  */
 export function splitSubtitleItem(
   subtitles: SubtitleItem[],
@@ -98,24 +101,33 @@ export function splitSubtitleItem(
   const item = subtitles[index];
   const midPoint = splitTime !== undefined ? splitTime : Number(((item.startTime + item.endTime) / 2).toFixed(2));
 
-  // Split original and translated text by spaces
-  const origWords = item.originalText.trim().split(/\s+/);
-  const transWords = item.translatedText.trim().split(/\s+/);
+  // Cut token list at the boundary nearest the char-count midpoint.
+  const splitTokens = (text: string): [string, string] => {
+    const tokens = segmentWords(text);
+    if (tokens.length <= 1) return [text, text];
+    const total = tokens.reduce((sum, t) => sum + t.length, 0);
+    let acc = 0;
+    let cut = 1;
+    for (let i = 0; i < tokens.length; i++) {
+      acc += tokens[i].length;
+      if (acc >= total / 2) {
+        cut = Math.min(tokens.length - 1, Math.max(1, i + 1));
+        break;
+      }
+    }
+    return [tokens.slice(0, cut).join(''), tokens.slice(cut).join('')];
+  };
 
-  const origCut = Math.max(1, Math.ceil(origWords.length / 2));
-  const transCut = Math.max(1, Math.ceil(transWords.length / 2));
+  const [origHalf1, origHalf2] = splitTokens(item.originalText.trim());
+  const [transHalf1, transHalf2] = splitTokens(item.translatedText.trim());
 
-  const origHalf1 = origWords.slice(0, origCut).join(' ');
-  const origHalf2 = origWords.slice(origCut).join(' ') || origHalf1;
-
-  const transHalf1 = transWords.slice(0, transCut).join(' ');
-  const transHalf2 = transWords.slice(transCut).join(' ') || transHalf1;
-
+  // Old word timings are stale after a split — drop them.
   const part1: SubtitleItem = {
     ...item,
     endTime: midPoint,
     originalText: origHalf1,
     translatedText: transHalf1,
+    words: undefined,
   };
 
   const part2: SubtitleItem = {
@@ -124,6 +136,7 @@ export function splitSubtitleItem(
     endTime: item.endTime,
     originalText: origHalf2,
     translatedText: transHalf2,
+    words: undefined,
   };
 
   const updated = [...subtitles];

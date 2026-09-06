@@ -8,6 +8,8 @@ export interface AppState {
   videoUrl: string | null;
   videoDuration: number;
   isLargeFile: boolean;
+  videoWidth: number;
+  videoHeight: number;
 
   // Subtitles
   subtitles: SubtitleItem[];
@@ -39,7 +41,7 @@ export interface AppState {
 }
 
 export type AppAction =
-  | { type: 'SET_FILE'; payload: { file: File; url: string; duration: number; isLargeFile: boolean } }
+  | { type: 'SET_FILE'; payload: { file: File; url: string; duration: number; isLargeFile: boolean; videoWidth?: number; videoHeight?: number } }
   | { type: 'SET_SUBTITLES'; payload: SubtitleItem[] }
   | { type: 'UPDATE_SUBTITLES'; payload: SubtitleItem[] }
   | { type: 'SET_CURRENT_TIME'; payload: number }
@@ -67,6 +69,8 @@ export const initialState: AppState = {
   videoUrl: null,
   videoDuration: 0,
   isLargeFile: false,
+  videoWidth: 0,
+  videoHeight: 0,
   subtitles: [],
   targetLanguage: 'th',
   currentTime: 0,
@@ -102,6 +106,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         videoUrl: action.payload.url,
         videoDuration: action.payload.duration,
         isLargeFile: action.payload.isLargeFile,
+        videoWidth: action.payload.videoWidth ?? 0,
+        videoHeight: action.payload.videoHeight ?? 0,
         subtitles: [],
         past: [],
         future: [],

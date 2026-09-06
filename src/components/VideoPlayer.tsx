@@ -3,6 +3,11 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { SubtitleItem } from '@/lib/types';
 import { findActiveSubtitle } from '@/lib/subtitleUtils';
+import {
+  SubtitleStyleSettings,
+  COLOR_OPTIONS,
+  FONT_SIZE_OPTIONS,
+} from '@/lib/subtitleStyle';
 import { Settings, Type } from 'lucide-react';
 
 interface VideoPlayerProps {
@@ -11,6 +16,8 @@ interface VideoPlayerProps {
   currentTime: number;
   onTimeUpdate: (time: number) => void;
   seekTime: number | null;
+  style: SubtitleStyleSettings;
+  onStyleChange: (s: SubtitleStyleSettings) => void;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -19,17 +26,33 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   currentTime,
   onTimeUpdate,
   seekTime,
+  style,
+  onStyleChange,
 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [showSettings, setShowSettings] = useState<boolean>(false);
+  // Player frame height in CSS px — used to scale the font exactly like
+  // libass scales it against the video's real height.
+  const [frameH, setFrameH] = useState<number>(360);
   // Intrinsic aspect (w/h) of the loaded media — portrait videos get a tall
   // frame instead of being letterboxed into a 16:9 sliver.
   const [videoAspect, setVideoAspect] = useState<number | null>(null);
+  // Real pixel height of the media (libass sizes fonts against it).
+  const [videoHeight, setVideoHeight] = useState<number | null>(null);
 
-  // Styling Customizer States
-  const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg' | 'xl'>('lg');
-  const [textColor, setTextColor] = useState<string>('#FFFFFF');
-  const [position, setPosition] = useState<'bottom' | 'top'>('bottom');
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect && entry.contentRect.height > 0) {
+          setFrameH(Math.round(entry.contentRect.height));
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   // Synchronize seek requests from parent/SubtitleEditor
   useEffect(() => {
@@ -38,12 +61,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [seekTime]);
 
-  // Reset aspect when the media changes (adjust-state-during-render
-  // pattern — cheaper and lint-clean versus a syncing effect)
+  // Reset media-derived state when the media changes (adjust-state-during-
+  // render pattern — lint-clean versus a syncing effect)
   const [prevUrl, setPrevUrl] = useState<string | null>(videoUrl);
   if (prevUrl !== videoUrl) {
     setPrevUrl(videoUrl);
     setVideoAspect(null);
+    setVideoHeight(null);
   }
 
   // Keyboard shortcuts (Space = play/pause, Left = -5s, Right = +5s).
@@ -92,18 +116,40 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Find currently active subtitle (binary search; list is sorted by time)
   const activeSubtitle = findActiveSubtitle(subtitles, currentTime);
 
-  // Dynamic CSS classes for subtitle overlay based on settings
-  const fontClasses = {
-    sm: 'text-base sm:text-lg',
-    md: 'text-lg sm:text-xl',
-    lg: 'text-xl sm:text-2xl',
-    xl: 'text-2xl sm:text-3xl font-bold',
-  }[fontSize];
+  // Font size mirrors the hardsub burn: libass sizes `Fontsize` against the
+  // video's real pixel height; we scale by the same ratio onto the frame.
+  const scaleBase = videoHeight || 288;
+  const scaledFontSize = Math.max(12, Math.round((style.fontSize * frameH) / scaleBase));
 
-  const posClass = position === 'top' ? 'top-12' : 'bottom-12';
+  // Position: real px from the frame edge (marginV), middle = centered
+  const overlayPositionStyle: React.CSSProperties =
+    style.position === 'top'
+      ? { top: style.marginV }
+      : style.position === 'middle'
+        ? { top: '50%', transform: 'translateY(-50%)' }
+        : { bottom: style.marginV };
+
+  // Box (borderStyle 4) vs outline (1) — matching the ASS BackColour/Outline
+  const bgStyle: React.CSSProperties =
+    style.borderStyle === 4
+      ? { backgroundColor: 'rgba(0,0,0,0.5)' }
+      : { textShadow: '-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000' };
+
+  // Karaoke highlight: index of the word currently being "sung"
+  const activeWordIdx = (() => {
+    if (!activeSubtitle?.words) return -1;
+    const words = activeSubtitle.words;
+    for (let i = 0; i < words.length; i++) {
+      if (currentTime < words[i].end) return i;
+    }
+    return words.length; // all sung
+  })();
+
+  const textColor = `#${style.primaryColor}`;
 
   return (
     <div
+      ref={containerRef}
       className="relative w-full aspect-video max-h-[70svh] bg-black rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group flex items-center justify-center"
       style={videoAspect ? { aspectRatio: String(videoAspect) } : undefined}
     >
@@ -118,6 +164,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               const w = e.currentTarget.videoWidth;
               const h = e.currentTarget.videoHeight;
               if (w && h) setVideoAspect(w / h);
+              if (h) setVideoHeight(h);
             }}
             onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
             className="w-full h-full object-contain"
@@ -132,9 +179,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <Settings className="w-4 h-4" />
           </button>
 
-          {/* Style Customizer Panel */}
+          {/* Style Customizer Panel — writes to the SHARED style state */}
           {showSettings && (
-            <div className="absolute top-14 right-4 z-30 p-3 rounded-xl bg-zinc-900/95 border border-zinc-800 backdrop-blur-xl text-xs space-y-2.5 shadow-2xl w-56 text-zinc-200">
+            <div className="absolute top-14 right-4 z-30 p-3 rounded-xl bg-zinc-900/95 border border-zinc-800 backdrop-blur-xl text-xs space-y-2.5 shadow-2xl w-60 max-h-[80%] overflow-y-auto custom-scrollbar text-zinc-200">
               <div className="flex items-center justify-between text-zinc-400 font-medium">
                 <span className="flex items-center gap-1">
                   <Type className="w-3.5 h-3.5 text-blue-400" />
@@ -147,12 +194,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-zinc-400">Size:</span>
                 <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
-                  {(['sm', 'md', 'lg', 'xl'] as const).map((sz) => (
+                  {FONT_SIZE_OPTIONS.map((sz) => (
                     <button
                       key={sz}
-                      onClick={() => setFontSize(sz)}
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all ${
-                        fontSize === sz ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
+                      onClick={() => onStyleChange({ ...style, fontSize: sz })}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                        style.fontSize === sz ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
                       }`}
                     >
                       {sz}
@@ -161,33 +208,34 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 </div>
               </div>
 
-              {/* Color Selector */}
+              {/* Color Selector (shared with hardsub export) */}
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-zinc-400">Color:</span>
                 <div className="flex items-center gap-1.5">
-                  {['#FFFFFF', '#FACC15', '#38BDF8', '#4ADE80'].map((col) => (
+                  {COLOR_OPTIONS.map((col) => (
                     <button
                       key={col}
-                      onClick={() => setTextColor(col)}
-                      style={{ backgroundColor: col }}
+                      onClick={() => onStyleChange({ ...style, primaryColor: col })}
+                      style={{ backgroundColor: `#${col}` }}
+                      aria-label={`Text color ${col}`}
                       className={`w-4 h-4 rounded-full border border-white/20 transition-transform ${
-                        textColor === col ? 'scale-125 ring-2 ring-blue-500' : 'hover:scale-110'
+                        style.primaryColor === col ? 'scale-125 ring-2 ring-blue-500' : 'hover:scale-110'
                       }`}
                     />
                   ))}
                 </div>
               </div>
 
-              {/* Position Selector */}
+              {/* Position Selector (top / middle / bottom) */}
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-zinc-400">Position:</span>
                 <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
-                  {(['bottom', 'top'] as const).map((pos) => (
+                  {(['top', 'middle', 'bottom'] as const).map((pos) => (
                     <button
                       key={pos}
-                      onClick={() => setPosition(pos)}
+                      onClick={() => onStyleChange({ ...style, position: pos })}
                       className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize transition-all ${
-                        position === pos ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
+                        style.position === pos ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
                       }`}
                     >
                       {pos}
@@ -195,17 +243,64 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   ))}
                 </div>
               </div>
+
+              {/* Vertical Margin (drives both preview and burn) */}
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-zinc-400 shrink-0">Margin:</span>
+                <input
+                  type="range"
+                  min={10}
+                  max={120}
+                  step={2}
+                  value={style.marginV}
+                  onChange={(e) => onStyleChange({ ...style, marginV: Number(e.target.value) })}
+                  className="flex-1 accent-blue-600"
+                />
+                <span className="text-[10px] font-mono text-zinc-400 w-7 text-right">{style.marginV}</span>
+              </div>
+
+              {/* Background: outline vs black box */}
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-zinc-400">Background:</span>
+                <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                  {([1, 4] as const).map((bs) => (
+                    <button
+                      key={bs}
+                      onClick={() => onStyleChange({ ...style, borderStyle: bs })}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                        style.borderStyle === bs ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      {bs === 1 ? 'Outline' : 'Black Box'}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
-          {/* Custom Subtitle Overlay */}
+          {/* Custom Subtitle Overlay (controlled by shared style) */}
           {activeSubtitle && (
-            <div className={`absolute ${posClass} left-0 right-0 px-6 text-center pointer-events-none z-10 transition-all duration-150`}>
+            <div
+              className="absolute left-0 right-0 px-6 text-center pointer-events-none z-10 transition-all duration-150"
+              style={overlayPositionStyle}
+            >
               <span
-                style={{ color: textColor }}
-                className={`inline-block px-4 py-2 rounded-xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] ${fontClasses} tracking-wide leading-relaxed font-itim`}
+                style={{ fontSize: `${scaledFontSize}px`, ...bgStyle }}
+                className="inline-block px-4 py-2 rounded-xl tracking-wide leading-relaxed font-itim"
               >
-                {activeSubtitle.translatedText}
+                {activeSubtitle.words && activeWordIdx >= 0 ? (
+                  activeSubtitle.words.map((w, i) => (
+                    <span
+                      key={`${w.start}-${i}`}
+                      style={{ color: i <= activeWordIdx ? textColor : '#FFFFFF' }}
+                    >
+                      {w.text}
+                    </span>
+                  ))
+                ) : (
+                  <span style={{ color: textColor }}>{activeSubtitle.translatedText}</span>
+                )}
               </span>
             </div>
           )}

@@ -91,7 +91,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
         <input
           type="text"
           value={item.translatedText}
-          onChange={(e) => onUpdate({ ...item, translatedText: e.target.value })}
+          onChange={(e) => onUpdate({ ...item, translatedText: e.target.value, words: undefined })}
           placeholder="Translated Subtitle (Thai)"
           aria-label="Translated subtitle text"
           className="w-full bg-zinc-950/60 border border-zinc-800/80 focus:border-blue-500/80 rounded-lg px-3 py-2 text-base sm:text-sm text-zinc-100 font-medium placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-all"

@@ -24,8 +24,9 @@ export function formatTimeVTT(seconds: number): string {
 /**
  * Thai (and other script) word segmentation via Intl.Segmenter (ICU dictionary).
  * Returns word tokens. Falls back to character splitting when unsupported.
+ * Exported for the editor's manual split (Thai must never cut mid-word).
  */
-function segmentWords(text: string): string[] {
+export function segmentWords(text: string): string[] {
   try {
     if (typeof Intl !== 'undefined' && Intl.Segmenter) {
       const segmenter = new Intl.Segmenter('th', { granularity: 'word' });
@@ -43,7 +44,7 @@ function segmentWords(text: string): string[] {
  * Wraps text into visual lines at word boundaries (no mid-word cuts).
  * A single token longer than maxChars is hard-split (rare: URLs/numbers).
  */
-function wrapByWords(text: string, maxChars: number): string[] {
+export function wrapByWords(text: string, maxChars: number): string[] {
   const words = segmentWords(text);
   const lines: string[] = [];
   let cur = '';
@@ -212,7 +213,10 @@ export function sanitizeAndFixOverlaps(items: SubtitleItem[]): SubtitleItem[] {
     }
   }
 
-  // Pass B: Fix endTimes to ensure valid duration and zero overlap with next startTime
+  // Pass B: Fix endTimes to ensure valid duration and zero overlap with next startTime.
+  // When truncation leaves a cue too short to be readable (<0.3s), first try
+  // reclaiming room: shift start backward into the previous gap (max 1.0s —
+  // stay near the speech) and extend the end into any remaining room.
   for (let i = 0; i < sorted.length; i++) {
     const current = sorted[i];
     const hasNext = i < sorted.length - 1;
@@ -220,14 +224,28 @@ export function sanitizeAndFixOverlaps(items: SubtitleItem[]): SubtitleItem[] {
       ? Number((sorted[i + 1].startTime - 0.05).toFixed(3))
       : Infinity;
 
-    if (current.endTime <= current.startTime) {
-      current.endTime = Math.min(maxAllowedEnd, Number((current.startTime + 2.0).toFixed(3)));
-    } else if (current.endTime > maxAllowedEnd) {
+    if (current.endTime > maxAllowedEnd) {
       current.endTime = maxAllowedEnd;
     }
 
-    if (current.endTime <= current.startTime) {
-      current.endTime = Number((current.startTime + 0.1).toFixed(3));
+    if (current.endTime - current.startTime < 0.3) {
+      if (i > 0) {
+        const prevEnd = sorted[i - 1].endTime;
+        const shift = Math.min(1.0, 0.3 - (current.endTime - current.startTime));
+        const candidateStart = Math.max(prevEnd + 0.05, current.startTime - shift);
+        if (candidateStart < current.startTime) {
+          current.startTime = Number(candidateStart.toFixed(3));
+        }
+      }
+      if (current.endTime - current.startTime < 0.3 && current.endTime < maxAllowedEnd) {
+        current.endTime = Math.min(maxAllowedEnd, Number((current.startTime + 0.3).toFixed(3)));
+      }
+      if (current.endTime <= current.startTime) {
+        current.endTime = Math.min(maxAllowedEnd, Number((current.startTime + 2.0).toFixed(3)));
+      }
+      if (current.endTime <= current.startTime) {
+        current.endTime = Number((current.startTime + 0.1).toFixed(3));
+      }
     }
   }
 
@@ -313,7 +331,9 @@ export function parseTimestampToSeconds(input: string | number | undefined | nul
 /**
  * Chunks overlap by ~1.5s, so a word straddling a boundary can be transcribed
  * twice (once per adjacent chunk). Drop a new item when an existing one starts
- * within the overlap window AND shares most of its text.
+ * within the overlap window AND shares most of its text (LCS ratio — order-
+ * sensitive, unlike bag-of-chars, so repetitive-but-different Thai phrases
+ * are not falsely dropped).
  */
 function isNearBoundaryDuplicate(prev: SubtitleItem, next: SubtitleItem): boolean {
   if (Math.abs(prev.startTime - next.startTime) > 1.6) return false;
@@ -325,14 +345,20 @@ function isNearBoundaryDuplicate(prev: SubtitleItem, next: SubtitleItem): boolea
   const b = normalize(next.translatedText);
   if (!a || !b || Math.min(a.length, b.length) < 4) return false;
 
-  const shorter = a.length < b.length ? a : b;
-  const longer = a.length < b.length ? b : a;
-
-  let common = 0;
-  for (const ch of shorter) {
-    if (longer.includes(ch)) common++;
+  // LCS DP on short strings (cues are ≤ ~40 chars after wrapping)
+  const m = a.length;
+  const n = b.length;
+  let prevRow = new Array<number>(n + 1).fill(0);
+  let row = new Array<number>(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      row[j] = a[i - 1] === b[j - 1] ? prevRow[j - 1] + 1 : Math.max(prevRow[j], row[j - 1]);
+    }
+    [prevRow, row] = [row, prevRow];
   }
-  return common / longer.length > 0.7;
+  const lcsLen = prevRow[n];
+
+  return lcsLen / Math.max(a.length, b.length) > 0.7;
 }
 
 /**

@@ -6,6 +6,7 @@ import { env } from './env';
 import { getTempRoot, MAX_UPLOAD_BYTES } from './security';
 import { pumpToWriteStream } from './streamPump';
 import { hasThaiChars } from './languageCheck';
+import { validateWordTimings, interpolateWords, distributeWordsByChars, type WordTiming } from './wordTiming';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -19,12 +20,124 @@ interface GeminiRawSubtitleItem {
   text?: string; // fallback field sometimes returned by model
 }
 
+interface GeminiRawWordTiming {
+  id: string;
+  words: { text: string; startTime: string; endTime: string }[];
+}
+
+const WORD_TIMING_SCHEMA = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      id: { type: Type.STRING },
+      words: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            text: { type: Type.STRING },
+            startTime: { type: Type.STRING },
+            endTime: { type: Type.STRING },
+          },
+          required: ['text', 'startTime', 'endTime'],
+        },
+      },
+    },
+    required: ['id', 'words'],
+  },
+};
+
+/**
+ * Optional second pass for karaoke: re-listens to the same audio and asks
+ * Gemini for per-word timings inside each cue. Any cue whose timings fail
+ * validation falls back to character-proportional distribution, so the
+ * highlight degrades smoothly instead of breaking.
+ */
+async function attachWordTimings(
+  ai: GoogleGenAI,
+  filePath: string,
+  mimeType: string,
+  subtitles: SubtitleItem[],
+  signal?: AbortSignal
+): Promise<SubtitleItem[]> {
+  try {
+    const fallback = subtitles.map((cue) => ({
+      ...cue,
+      words: distributeWordsByChars(cue.translatedText, cue.startTime, cue.endTime),
+    }));
+
+    const uploaded = await ai.files.upload({
+      file: filePath,
+      config: { mimeType, displayName: `word_timing_${Date.now()}` },
+    });
+    if (!uploaded.name || !uploaded.uri) throw new Error('Word-timing file upload failed.');
+
+    try {
+      const deadline = Date.now() + 5 * 60 * 1000;
+      let state = await ai.files.get({ name: uploaded.name });
+      while (state.state === 'PROCESSING') {
+        if (Date.now() > deadline) throw new Error('Word-timing file processing timed out.');
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        state = await ai.files.get({ name: uploaded.name });
+      }
+      if (state.state === 'FAILED') throw new Error('Word-timing file processing failed.');
+
+      const cueList = subtitles.map((c) => ({
+        id: c.id,
+        cueStart: c.startTime,
+        cueEnd: c.endTime,
+        text: c.translatedText,
+      }));
+      if (cueList.length === 0) return fallback;
+
+      const raw = await requestJSON<GeminiRawWordTiming[]>({
+        prompt: `You are a precise speech-to-word-timing aligner. Listen to the audio and assign the exact spoken time range for each word of each subtitle cue.
+
+For every cue below, split its text into the words that are actually SPOKEN and give the instant each word starts and finishes ("HH:MM:SS.mmm"). Word times must stay inside the cue's [cueStart, cueEnd] range and be in chronological order. Preserve the cue id exactly.
+
+Cues:
+${JSON.stringify(cueList)}`,
+        schema: WORD_TIMING_SCHEMA,
+        signal,
+      });
+
+      const byId = new Map<string, GeminiRawWordTiming['words']>();
+      for (const item of raw || []) {
+        if (item && item.id) byId.set(item.id, item.words || []);
+      }
+
+      return subtitles.map((cue) => {
+        const rawWords = byId.get(cue.id) || [];
+        const parsed: WordTiming[] = rawWords.map((w) => ({
+          text: String(w.text || ''),
+          start: parseTimestampToSeconds(w.startTime),
+          end: parseTimestampToSeconds(w.endTime),
+        }));
+        if (validateWordTimings(parsed, cue.startTime, cue.endTime)) {
+          return { ...cue, words: interpolateWords(parsed, cue.startTime, cue.endTime) };
+        }
+        return { ...cue, words: distributeWordsByChars(cue.translatedText, cue.startTime, cue.endTime) };
+      });
+    } finally {
+      ai.files.delete({ name: uploaded.name }).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[Word Timing] Pass failed, falling back to proportional distribution:', err);
+    return subtitles.map((cue) => ({
+      ...cue,
+      words: distributeWordsByChars(cue.translatedText, cue.startTime, cue.endTime),
+    }));
+  }
+}
+
 export async function processVideoSubtitlesFromStream(
   stream: ReadableStream<Uint8Array>,
   mimeType: string,
   fileName: string,
   targetLanguage: string = 'th',
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  wordTiming: boolean = false
 ): Promise<SubtitleItem[]> {
   const apiKeys = env.apiKeys;
   if (apiKeys.length === 0) {
@@ -122,12 +235,17 @@ ${audioDuration > 0 ? `REAL MEDIA DURATION IS ${audioDuration.toFixed(3)} SECOND
 3. Do NOT output raw floating point numbers or MM.SS decimal formats for timestamps. Always use "HH:MM:SS.mmm".
 
 CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
-4. Each cue MUST be 2-7 seconds long. NEVER merge multiple sentences into one long cue, and NEVER output 10-20 second cues.
+4. Each cue MUST be 1.5-4 seconds long (hard limits: never shorter than 2s, never longer than 7s). NEVER merge multiple sentences into one long cue, and NEVER output 10-20 second cues.
 5. Break speech at sentence or clause boundaries (pauses / intonation). One complete idea per cue.
 6. Keep each cue to at most 2 visual lines: ~40 characters for Thai, ~10-12 words for languages with spaces.
 7. NEVER split a word across lines or cues. For Thai (no spaces between words), always end a cue at a phrase boundary — never mid-word.
 8. Ignore long silent sections or background music without speech.
-9. Output strictly formatted according to the requested JSON schema.`;
+9. Output strictly formatted according to the requested JSON schema.
+
+CRITICAL SPEECH-SYNC RULES (HIGHEST PRIORITY):
+A. 'startTime' = the exact instant the FIRST syllable of that cue is spoken. 'endTime' = the exact instant the LAST syllable FINISHES. Never start a cue before its speech begins; never let a cue linger after its speech ends.
+B. If a sentence contains an internal silent pause longer than 0.8 seconds, split it into TWO cues AT the pause. Never let one cue span a silent gap.
+C. Timestamps must follow the ACTUAL speech rhythm you hear — not proportional guesses. A sentence spoken quickly gets a short cue even if it has many characters; a slowly-spoken short phrase gets a longer cue.`;
 
           const response = await ai.models.generateContent({
             model: modelName,
@@ -209,7 +327,7 @@ CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
               try {
                 const retryPrompt = `Re-transcribe and re-translate the speech in this audio file, but ONLY its true timestamps matter.
 REAL AUDIO DURATION IS EXACTLY ${audioDuration.toFixed(3)} SECONDS. Every cue MUST lie strictly inside [0, ${audioDuration.toFixed(3)}]. The first cue starts at 00:00:00.000, the last cue ends no later than ${formatDur(audioDuration)}.
-Assign each cue's start/end to the exact moment the words are actually spoken — do NOT stretch cues, do NOT invent long silent gaps, and do NOT output any timestamp past the real duration. Each cue is 2-7 seconds. Skip regions with no speech.
+Assign each cue's start/end to the exact moment the words are actually spoken: startTime = the instant the FIRST syllable is spoken, endTime = the instant the LAST syllable finishes. Do NOT stretch cues, do NOT invent long silent gaps, and do NOT output any timestamp past the real duration. Most cues are 1.5-4 seconds (hard limits 2-7s); if a sentence contains a silent pause longer than 0.8 seconds, split it into two cues AT the pause. Skip regions with no speech.
 TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output valid JSON array with id, startTime, endTime (HH:MM:SS.mmm), originalText, translatedText.`;
 
                 const retryRes = await ai.models.generateContent({
@@ -315,6 +433,12 @@ ${JSON.stringify(subtitles, null, 2)}`;
                 console.warn('[Language Guard] Fallback translation warning:', transErr);
               }
             }
+          }
+
+          // Optional karaoke pass: per-word timings (never fails the request —
+          // falls back to proportional distribution internally)
+          if (wordTiming && subtitles.length > 0) {
+            subtitles = await attachWordTimings(ai, tempFilePath, mimeType, subtitles, signal);
           }
 
           // Clean up remote file asynchronously

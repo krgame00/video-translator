@@ -1,30 +1,37 @@
 'use client';
 
-import React, { useReducer, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useReducer, useEffect, useMemo, useCallback, useRef, useState } from 'react';
 import { VideoPlayer } from '@/components/VideoPlayer';
 import { Timeline } from '@/components/Timeline';
 import { SubtitleEditor } from '@/components/SubtitleEditor';
 import { ExportModal } from '@/components/ExportModal';
-import { Upload, Download, Languages, Video, AlertCircle, Clock, XCircle, RotateCcw, HelpCircle, Film, Sparkles, Undo2, Redo2, FileText } from 'lucide-react';
+import { Upload, Download, Languages, Video, AlertCircle, Clock, XCircle, RotateCcw, HelpCircle, Film, Sparkles, Undo2, Redo2, FileText, MicVocal } from 'lucide-react';
 
 import { extractAudioChunks, AudioChunk } from '@/lib/audioExtractor';
 import { mergeChunkSubtitles } from '@/lib/srtFormatter';
 import { findActiveSubtitle } from '@/lib/subtitleUtils';
 import { appReducer, initialState } from '@/lib/appReducer';
 import { SubtitleItem } from '@/lib/types';
+import { SubtitleStyleSettings, DEFAULT_SUBTITLE_STYLE, loadSubtitleStyle, saveSubtitleStyle } from '@/lib/subtitleStyle';
 
 const SUBTITLES_STORAGE_KEY = 'video_translator_subtitles';
+const KARAOKE_STORAGE_KEY = 'karaoke_enabled';
 // Text-edit bursts within this window collapse into one undo step.
 const HISTORY_BURST_MS = 800;
 
 export default function Home() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const {
-    selectedFile, videoUrl, videoDuration, isLargeFile, subtitles, targetLanguage,
+    selectedFile, videoUrl, videoDuration, videoWidth, videoHeight, isLargeFile, subtitles, targetLanguage,
     currentTime, seekTime, isLoading, statusMessage, error, estimatedTotalSecs,
     elapsedSecs, past, future, isExportOpen, isShortcutsModalOpen, hasMounted,
     toast, abortController
   } = state;
+
+  // Shared subtitle style (player preview == hardsub burn), persisted
+  const [subStyle, setSubStyle] = useState<SubtitleStyleSettings>(DEFAULT_SUBTITLE_STYLE);
+  // Karaoke word-highlight generation (opt-in, costs one extra AI pass/chunk)
+  const [karaokeEnabled, setKaraokeEnabled] = useState(false);
 
   const subtitlesRef = useRef(subtitles);
   useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
@@ -52,6 +59,27 @@ export default function Home() {
         console.error('Failed to parse saved subtitles:', e);
       }
     }
+    // Load persisted preferences AFTER mount (hydration-safe). The microtask
+    // keeps setState out of the effect body (react-hooks/set-state-in-effect).
+    queueMicrotask(() => {
+      setSubStyle(loadSubtitleStyle());
+      setKaraokeEnabled(localStorage.getItem(KARAOKE_STORAGE_KEY) === '1');
+    });
+  }, []);
+
+  // Persist shared subtitle style (debounced)
+  useEffect(() => {
+    if (!hasMounted) return;
+    const t = setTimeout(() => saveSubtitleStyle(subStyle), 400);
+    return () => clearTimeout(t);
+  }, [subStyle, hasMounted]);
+
+  const handleKaraokeToggle = useCallback(() => {
+    setKaraokeEnabled((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(KARAOKE_STORAGE_KEY, next ? '1' : '0'); } catch {}
+      return next;
+    });
   }, []);
 
   // Save to localStorage (debounced so every keystroke does not stringify
@@ -140,7 +168,15 @@ export default function Home() {
     tempVid.src = url;
     tempVid.onloadedmetadata = () => {
       const dur = tempVid.duration || 0;
-      dispatch({ type: 'SET_FILE', payload: { file, url, duration: dur, isLargeFile: file.size > 500 * 1024 * 1024 } });
+      dispatch({
+        type: 'SET_FILE',
+        payload: {
+          file, url, duration: dur,
+          isLargeFile: file.size > 500 * 1024 * 1024,
+          videoWidth: tempVid.videoWidth || 0,
+          videoHeight: tempVid.videoHeight || 0,
+        },
+      });
       dispatch({ type: 'SET_ESTIMATED_SECS', payload: Math.max(10, Math.round(dur * 0.05 + 8)) });
       dispatch({ type: 'SET_TOAST', payload: {
         msg: `Loaded: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB)`,
@@ -205,6 +241,7 @@ export default function Home() {
           formData.append('targetLanguage', targetLanguage);
           formData.append('chunkIndex', String(chunk.chunkIndex));
           formData.append('chunkStartTime', String(chunk.startTime));
+          formData.append('wordTiming', karaokeEnabled ? '1' : '0');
 
           for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
@@ -267,6 +304,7 @@ export default function Home() {
         const formData = new FormData();
         formData.append('file', fileToSend, fileNameToSend);
         formData.append('targetLanguage', targetLanguage);
+        formData.append('wordTiming', karaokeEnabled ? '1' : '0');
 
         const res = await fetch('/api/video-translate', {
           method: 'POST', body: formData, signal: controller.signal
@@ -286,7 +324,7 @@ export default function Home() {
         dispatch({ type: 'TRANSLATION_ERROR', payload: err instanceof Error ? err.message : 'An error occurred during translation.' });
       }
     }
-  }, [selectedFile, targetLanguage, estimatedTotalSecs]);
+  }, [selectedFile, targetLanguage, estimatedTotalSecs, karaokeEnabled]);
 
   const handleJumpToTime = useCallback((time: number) => {
     dispatch({ type: 'SET_SEEK_TIME', payload: time });
@@ -409,6 +447,22 @@ export default function Home() {
               <span className="hidden lg:inline">Generate Subtitles</span>
             </button>
           )}
+
+          {selectedFile && (
+            <button
+              onClick={handleKaraokeToggle}
+              aria-pressed={karaokeEnabled}
+              className={`px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border ${
+                karaokeEnabled
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+              title="ไฮไลต์ทีละคำ (karaoke) — ใช้ AI pass เพิ่ม 1 call ต่อ chunk"
+            >
+              <MicVocal className="w-4 h-4" />
+              <span className="hidden xl:inline">ไฮไลต์ทีละคำ</span>
+            </button>
+          )}
         </div>
       </header>
 
@@ -501,7 +555,7 @@ export default function Home() {
           <div className="flex-1 flex flex-col gap-4 min-h-0">
             <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 min-h-0">
               <div className="lg:col-span-7 xl:col-span-8 lg:h-[520px] min-h-0">
-                <VideoPlayer videoUrl={videoUrl} subtitles={subtitles} currentTime={currentTime} onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })} seekTime={seekTime} />
+                <VideoPlayer videoUrl={videoUrl} subtitles={subtitles} currentTime={currentTime} onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })} seekTime={seekTime} style={subStyle} onStyleChange={setSubStyle} />
               </div>
               <div className="h-[72svh] min-h-[420px] lg:h-[520px] lg:min-h-0">
                 <SubtitleEditor subtitles={subtitles} currentTime={currentTime} onSubtitlesChange={handleSubtitlesLiveChange} onJumpTo={handleJumpToTime} targetLanguage={targetLanguage} notify={showToast} />
@@ -515,7 +569,7 @@ export default function Home() {
       </div>
 
       {/* Export Modal */}
-      <ExportModal isOpen={isExportOpen} onClose={() => dispatch({ type: 'SET_EXPORT_OPEN', payload: false })} subtitles={subtitles} videoUrl={videoUrl} selectedFile={selectedFile} duration={videoDuration} notify={showToast} />
+      <ExportModal isOpen={isExportOpen} onClose={() => dispatch({ type: 'SET_EXPORT_OPEN', payload: false })} subtitles={subtitles} videoUrl={videoUrl} selectedFile={selectedFile} duration={videoDuration} playResX={videoWidth || undefined} playResY={videoHeight || undefined} style={subStyle} onStyleChange={setSubStyle} notify={showToast} />
 
       {/* Keyboard Shortcuts */}
       {isShortcutsModalOpen && (

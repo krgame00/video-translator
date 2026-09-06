@@ -125,7 +125,41 @@ export function sanitizeStyle(raw: unknown): SubtitleStyle {
   const marginV = clampInt(o.marginV, 0, 200);
   if (marginV !== undefined) style.marginV = marginV;
 
+  if (o.position === 'top' || o.position === 'middle' || o.position === 'bottom') {
+    style.position = o.position;
+  }
+
   return style;
+}
+
+export interface PrepareOptions {
+  playResX?: number;
+  playResY?: number;
+  karaoke: boolean;
+  highlightColor?: string;
+}
+
+/**
+ * Whitelist-validates the ASS burn options sent alongside `prepare`.
+ * playRes dimensions clamp to sane video sizes; highlightColor must be hex.
+ */
+export function sanitizePrepareOptions(raw: unknown): PrepareOptions {
+  const out: PrepareOptions = { karaoke: false };
+  if (!raw || typeof raw !== 'object') return out;
+
+  const o = raw as Record<string, unknown>;
+  const playResX = clampInt(o.playResX, 100, 8000);
+  if (playResX !== undefined) out.playResX = playResX;
+  const playResY = clampInt(o.playResY, 100, 8000);
+  if (playResY !== undefined) out.playResY = playResY;
+
+  out.karaoke = o.karaoke === true;
+
+  if (typeof o.highlightColor === 'string' && /^[0-9A-Fa-f]{6}$/.test(o.highlightColor)) {
+    out.highlightColor = o.highlightColor.toUpperCase();
+  }
+
+  return out;
 }
 
 /** Maximum accepted upload size in bytes (default 1 GB, override via MAX_UPLOAD_BYTES env). */
