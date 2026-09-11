@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, test, expect } from 'vitest';
 import * as os from 'os';
-import { validateEnv, env, DEFAULT_MAX_UPLOAD_BYTES } from './env';
+import { validateEnv, env, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_FFMPEG_TIMEOUT_MS } from './env';
 
 const KEYS = [
   'GEMINI_API_KEY',
@@ -8,6 +8,7 @@ const KEYS = [
   'MAX_UPLOAD_BYTES',
   'FFMPEG_PATH',
   'FFMPEG_HWACCEL',
+  'FFMPEG_TIMEOUT_MS',
   'CRON_SECRET',
 ] as const;
 
@@ -72,4 +73,30 @@ test('validateEnv passes when TEMP_DIR exists', () => {
 test('env.maxUploadBytes falls back to 1 GB on invalid runtime value', () => {
   process.env.MAX_UPLOAD_BYTES = 'garbage';
   expect(env.maxUploadBytes).toBe(DEFAULT_MAX_UPLOAD_BYTES);
+});
+
+test('validateEnv applies default FFMPEG_TIMEOUT_MS', () => {
+  expect(validateEnv().FFMPEG_TIMEOUT_MS).toBe(DEFAULT_FFMPEG_TIMEOUT_MS);
+  expect(env.ffmpegTimeoutMs).toBe(DEFAULT_FFMPEG_TIMEOUT_MS);
+});
+
+test('validateEnv throws on non-numeric FFMPEG_TIMEOUT_MS', () => {
+  process.env.FFMPEG_TIMEOUT_MS = 'soon';
+  expect(() => validateEnv()).toThrow(/FFMPEG_TIMEOUT_MS/);
+});
+
+test('validateEnv throws when FFMPEG_TIMEOUT_MS exceeds the 30-minute ceiling', () => {
+  process.env.FFMPEG_TIMEOUT_MS = String(31 * 60 * 1000);
+  expect(() => validateEnv()).toThrow(/30-minute/);
+});
+
+test('validateEnv accepts a valid FFMPEG_TIMEOUT_MS override', () => {
+  process.env.FFMPEG_TIMEOUT_MS = String(10 * 60 * 1000);
+  expect(validateEnv().FFMPEG_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  expect(env.ffmpegTimeoutMs).toBe(10 * 60 * 1000);
+});
+
+test('env.ffmpegTimeoutMs falls back to 4 min on invalid runtime value', () => {
+  process.env.FFMPEG_TIMEOUT_MS = 'garbage';
+  expect(env.ffmpegTimeoutMs).toBe(DEFAULT_FFMPEG_TIMEOUT_MS);
 });

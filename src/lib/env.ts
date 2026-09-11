@@ -4,8 +4,13 @@ import * as fs from 'fs';
 /** Default cap for a single upload when MAX_UPLOAD_BYTES is unset (1 GB). */
 export const DEFAULT_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
 
-/** Hard ceiling: refuses absurd overrides (> 20 GB) instead of OOMing the box. */
+/** Default per-job FFmpeg kill timeout when FFMPEG_TIMEOUT_MS is unset (4 min). */
+export const DEFAULT_FFMPEG_TIMEOUT_MS = 4 * 60 * 1000;
+
+/** Hard ceiling: refuses absurd MAX_UPLOAD_BYTES overrides (> 20 GB) instead of OOMing the box. */
 const MAX_UPLOAD_BYTES_CEILING = 20 * 1024 * 1024 * 1024;
+/** Ceiling: refuses absurd FFMPEG_TIMEOUT_MS overrides (> 30 min) so one job can't pin the single encoder slot forever. */
+const FFMPEG_TIMEOUT_MS_CEILING = 30 * 60 * 1000;
 
 const emptyToUndefined = (v: unknown): unknown =>
   typeof v === 'string' && v.trim() === '' ? undefined : v;
@@ -41,6 +46,16 @@ const envSchema = z.object({
   ),
   FFMPEG_PATH: z.preprocess(emptyToUndefined, z.string().trim().min(1).max(512).optional()),
   FFMPEG_HWACCEL: z.preprocess(emptyToUndefined, z.string().trim().min(1).max(32).optional()),
+  FFMPEG_TIMEOUT_MS: z.preprocess(
+    emptyToUndefined,
+    z.coerce
+      .number()
+      .int('FFMPEG_TIMEOUT_MS must be an integer number of milliseconds')
+      .positive('FFMPEG_TIMEOUT_MS must be positive')
+      .max(FFMPEG_TIMEOUT_MS_CEILING, 'FFMPEG_TIMEOUT_MS exceeds the 30-minute ceiling')
+      .optional()
+      .default(DEFAULT_FFMPEG_TIMEOUT_MS),
+  ),
   CRON_SECRET: z.preprocess(emptyToUndefined, z.string().min(1).max(256).optional()),
 });
 
@@ -97,5 +112,17 @@ export const env = {
     const parsed = Number(raw);
     if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_MAX_UPLOAD_BYTES;
     return Math.min(parsed, MAX_UPLOAD_BYTES_CEILING);
+  },
+  /**
+   * Lazy read (never a module-level const) so tests and runtime env changes
+   * are honored. Falls back to 4 min on missing/invalid values; boot
+   * validation rejects invalid values outright in production.
+   */
+  get ffmpegTimeoutMs(): number {
+    const raw = process.env.FFMPEG_TIMEOUT_MS;
+    if (raw === undefined || raw.trim() === '') return DEFAULT_FFMPEG_TIMEOUT_MS;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_FFMPEG_TIMEOUT_MS;
+    return Math.min(parsed, FFMPEG_TIMEOUT_MS_CEILING);
   },
 };

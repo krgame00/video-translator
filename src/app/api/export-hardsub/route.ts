@@ -43,8 +43,18 @@ function scheduleEncode(jobId: string): void {
 }
 
 function onEncodeFinished(): void {
-  const next = pendingEncodes.shift();
-  if (next) void runFFmpegEncoding(next);
+  // Skip stale queue entries: a job cancelled while waiting was already
+  // cleaned up by the cancel handler — running it would re-create output
+  // for a job the user abandoned.
+  let next = pendingEncodes.shift();
+  while (next) {
+    const job = loadJob(next);
+    if (job && job.status !== 'cancelled') {
+      void runFFmpegEncoding(next);
+      return;
+    }
+    next = pendingEncodes.shift();
+  }
 }
 
 export const maxDuration = 300; // 5 minutes max execution per step
@@ -196,12 +206,32 @@ async function runFFmpegEncoding(jobId: string) {
     });
 
     const exitCode = await new Promise<number>((resolve, reject) => {
-      child!.on('close', (code) => resolve(code ?? -1));
-      child!.on('error', reject);
+      // Per-job kill timeout: an FFmpeg hang (stalled stdin, broken pipe,
+      // corrupt input) must never pin the single encoder slot forever and
+      // block the whole queue behind it. Env-tunable via FFMPEG_TIMEOUT_MS.
+      const timeoutMs = env.ffmpegTimeoutMs;
+      const timer = setTimeout(() => {
+        console.error(`[FFmpeg Hardsub ${jobId}] Timed out after ${timeoutMs} ms — killing encoder.`);
+        try { child!.kill('SIGKILL'); } catch {}
+        reject(new Error(`FFmpeg encoding timed out after ${Math.round(timeoutMs / 1000)}s.`));
+      }, timeoutMs);
+      // A fired timer finishing the process must not keep the server alive.
+      if (typeof timer.unref === 'function') timer.unref();
+      child!.on('close', (code) => {
+        clearTimeout(timer);
+        resolve(code ?? -1);
+      });
+      child!.on('error', (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
     });
 
+    // A SIGKILLed process also surfaces via 'close' — but the timeout already
+    // rejected above, and the finally block releases the slot. Guard here for
+    // the case where the child died on its own between timeout setup and wait.
     if (!activeEncodes.has(jobId)) {
-      // Cancelled while encoding; the cancel handler already cleaned up.
+      // Cancelled or timed out while encoding; state was already recorded.
       return;
     }
 
@@ -459,6 +489,15 @@ export async function POST(req: NextRequest) {
     const child = activeEncodes.get(jobId);
     if (child) {
       try { child.kill('SIGKILL'); } catch {}
+      // Release the encoder slot immediately: runFFmpegEncoding's finally
+      // also deletes, but the killed process may take seconds to exit and
+      // the queue must not stall behind a job the user already abandoned.
+      activeEncodes.delete(jobId);
+    } else {
+      // Not yet encoding — remove from the wait queue so onEncodeFinished
+      // never picks up a job the user abandoned.
+      const queuedIdx = pendingEncodes.indexOf(jobId);
+      if (queuedIdx !== -1) pendingEncodes.splice(queuedIdx, 1);
     }
 
     const job = loadJob(jobId);
