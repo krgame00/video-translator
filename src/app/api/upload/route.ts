@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { env } from '@/lib/env';
 import {
   isSafeUploadId,
   resolveTempPath,
-  MAX_UPLOAD_BYTES,
   HttpError,
   createRateLimiter,
   getClientIp,
@@ -88,7 +88,7 @@ export async function POST(req: NextRequest) {
         throw new HttpError(400, 'Unsupported file type. Only video/audio files are accepted.');
       }
 
-      if (totalSize > MAX_UPLOAD_BYTES) {
+      if (totalSize > env.maxUploadBytes) {
         throw new HttpError(413, 'File size too large.');
       }
 

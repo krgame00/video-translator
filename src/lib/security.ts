@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { SubtitleStyle } from './types';
-import { env } from './env';
+import { env, DEFAULT_MAX_UPLOAD_BYTES } from './env';
 
 const JOB_ID_RE = /^hs_[a-zA-Z0-9_]{1,40}$/;
 const UPLOAD_ID_RE = /^ul_[a-zA-Z0-9_]{1,40}$/;
@@ -160,13 +160,12 @@ export function sanitizePrepareOptions(raw: unknown): PrepareOptions {
   return out;
 }
 
-/** Maximum accepted upload size in bytes (default 1 GB, override via MAX_UPLOAD_BYTES env). */
-export const MAX_UPLOAD_BYTES = (() => {
-  const raw = process.env.MAX_UPLOAD_BYTES;
-  if (!raw) return 1024 * 1024 * 1024;
-  const parsed = parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1024 * 1024 * 1024;
-})();
+/**
+ * @deprecated Use `env.maxUploadBytes` from './env' instead. This static
+ * snapshot only carries the default and cannot see runtime env overrides.
+ * Kept for backward compatibility.
+ */
+export const MAX_UPLOAD_BYTES: number = DEFAULT_MAX_UPLOAD_BYTES;
 
 export class HttpError extends Error {
   status: number;
@@ -187,7 +186,7 @@ export function assertContentLength(req: BodyLike): void {
   const raw = req.headers.get('content-length');
   if (!raw) return;
   const size = parseInt(raw, 10);
-  if (Number.isFinite(size) && size > MAX_UPLOAD_BYTES) {
+  if (Number.isFinite(size) && size > env.maxUploadBytes) {
     throw new HttpError(413, 'Upload exceeds the maximum allowed size.');
   }
 }

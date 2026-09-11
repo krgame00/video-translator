@@ -3,7 +3,7 @@ import { MODELS, parsePartialOrTruncatedJSON, requestJSON, Type } from './gemini
 import { SubtitleItem } from './types';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps, clampSubtitlesToDuration } from './srtFormatter';
 import { env } from './env';
-import { getTempRoot, MAX_UPLOAD_BYTES } from './security';
+import { getTempRoot } from './security';
 import { pumpToWriteStream } from './streamPump';
 import { hasThaiChars } from './languageCheck';
 import { validateWordTimings, interpolateWords, distributeWordsByChars, type WordTiming } from './wordTiming';
@@ -166,7 +166,7 @@ export async function processVideoSubtitlesFromStream(
   const writeStream = fs.createWriteStream(tempFilePath);
   const reader = stream.getReader();
   try {
-    await pumpToWriteStream(reader, writeStream, MAX_UPLOAD_BYTES);
+    await pumpToWriteStream(reader, writeStream, env.maxUploadBytes);
   } catch (pumpErr) {
     writeStream.destroy();
     if (fs.existsSync(tempFilePath)) {

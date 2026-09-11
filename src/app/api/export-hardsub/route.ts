@@ -10,7 +10,6 @@ import {
   getTempRoot,
   sanitizeStyle,
   sanitizePrepareOptions,
-  MAX_UPLOAD_BYTES,
   HttpError,
   createRateLimiter,
   getClientIp,
@@ -351,7 +350,7 @@ export async function POST(req: NextRequest) {
       // and converts write errors (ENOSPC etc.) into a clean 500.
       const writeStream = fs.createWriteStream(job.inPath);
       try {
-        await pumpToWriteStream(req.body.getReader(), writeStream, MAX_UPLOAD_BYTES);
+        await pumpToWriteStream(req.body.getReader(), writeStream, env.maxUploadBytes);
       } catch (uploadErr) {
         writeStream.destroy();
         deleteJob(jobId);
