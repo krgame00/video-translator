@@ -3,16 +3,15 @@
  * `instrumentation.ts` convention). Fail-fast env validation: crash the boot
  * with one readable error instead of serving cryptic 500s on the first
  * request. No secrets are logged — only counts and paths.
+ *
+ * `instrumentation.ts` is bundled for BOTH the Node.js and Edge runtimes, and
+ * this module pulls in `lib/env`, which uses `fs` (Node-only). A static import
+ * breaks the Edge build with "A Node.js module is loaded ('fs')". The dynamic
+ * `import()` inside the `nodejs` branch keeps the fs dependency out of the Edge
+ * chunk — see "instrumentation.node.ts switcher" in the Next.js OpenTelemetry
+ * guide, which documents this exact split.
  */
-import { validateEnv } from './lib/env';
-
-export function register() {
-  const cfg = validateEnv();
-  const keyCount = cfg.GEMINI_API_KEY.split(',').filter((k) => k.trim().length > 0).length;
-  console.log(
-    `[boot] env OK — gemini keys: ${keyCount}, ` +
-      `tempDir: ${cfg.TEMP_DIR ?? '(os.tmpdir)'} / ` +
-      `maxUpload: ${Math.round(cfg.MAX_UPLOAD_BYTES / 1024 / 1024)} MB` +
-      `${cfg.FFMPEG_PATH ? ' / ffmpeg: custom' : ''}`,
-  );
+export async function register() {
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+  await import('./instrumentation.node');
 }
