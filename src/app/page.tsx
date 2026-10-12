@@ -525,10 +525,14 @@ export default function Home() {
         {showWorkspace && (
           <div className="flex-1 flex flex-col gap-4 min-h-0">
             <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 min-h-0">
-              <div className="lg:col-span-7 xl:col-span-8 lg:h-[520px] min-h-0">
+              <div className="lg:col-span-7 xl:col-span-8 lg:h-[520px] min-h-0 min-w-0">
                 <VideoPlayer videoUrl={videoUrl} subtitles={subtitles} currentTime={currentTime} onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })} seekTime={seekTime} style={subStyle} onStyleChange={setSubStyle} />
               </div>
-              <div className="h-[72svh] min-h-[420px] lg:h-[520px] lg:min-h-0">
+              {/* Must carry a matching col-span: the grid is 12 columns from
+                  lg: up, and a child without one defaults to span 1 — an
+                  eighth-width sidebar that squeezes the toolbar and clips the
+                  header copy. Mirrors the video column above (7 / 8 of 12). */}
+              <div className="lg:col-span-5 xl:col-span-4 h-[72svh] min-h-[420px] lg:h-[520px] lg:min-h-0">
                 <SubtitleEditor subtitles={subtitles} currentTime={currentTime} onSubtitlesChange={handleSubtitlesLiveChange} onJumpTo={handleJumpToTime} targetLanguage={targetLanguage} notify={showToast} />
               </div>
             </div>
