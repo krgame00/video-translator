@@ -235,7 +235,11 @@ export default function Home() {
         const { results: chunkResults, failedChunkIndexes: failedChunks } = await runChunkedTranslation(chunks, {
           targetLanguage,
           karaokeEnabled,
-          deps: { fetchImpl: fetch, signal: controller.signal },
+          // Bind to window: passing bare `fetch` loses its receiver when the
+          // pipeline invokes it as `deps.fetchImpl(...)`, and window.fetch
+          // then throws "Illegal invocation". Tests inject plain mock fns,
+          // which are receiver-independent, so they are unaffected.
+          deps: { fetchImpl: fetch.bind(window), signal: controller.signal },
           onProgress: (completed) => dispatch({ type: 'UPDATE_PROGRESS', payload: {
             statusMessage: `กำลังประมวลผล Gemini Parallel Stream (${completed}/${chunks.length} ท่อนสำเร็จแล้ว)...`
           } }),
@@ -259,12 +263,12 @@ export default function Home() {
         const fileNameToSend = selectedFile.name.replace(/\.[^/.]+$/, "") + ".wav";
 
         const subtitles = await runSingleTranslation({
-          blob: fileToSend,
-          fileName: fileNameToSend,
-          targetLanguage,
-          karaokeEnabled,
-          deps: { fetchImpl: fetch, signal: controller.signal },
-        });
+                  blob: fileToSend,
+                  fileName: fileNameToSend,
+                  targetLanguage,
+                  karaokeEnabled,
+                  deps: { fetchImpl: fetch.bind(window), signal: controller.signal },
+                });
 
         if (!controller.signal.aborted) {
           dispatch({ type: 'TRANSLATION_SUCCESS', payload: subtitles });

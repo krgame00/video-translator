@@ -136,3 +136,27 @@ test('runSingleTranslation returns subtitles and throws on API failure', async (
     })
   ).rejects.toThrow('boom');
 });
+
+test('receiver-sensitive fetch (window.fetch) is called with a valid receiver', async () => {
+  // Regression: page.tsx used to inject bare `fetch`. The pipeline invoked it as
+  // `deps.fetchImpl(...)`, so `this` became the deps object instead of `window`
+  // and browsers threw "Illegal invocation" on every translate. Plain mock fns
+  // are receiver-independent, so they never caught it — this fake reproduces
+  // the browser's brand check.
+  const win = { name: 'window' } as unknown as Window;
+  const brandCheckedFetch = function (this: unknown) {
+    if (this !== win) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    return Promise.resolve(okResponse());
+  } as unknown as typeof fetch;
+
+  const ctrl = new AbortController();
+  await expect(
+    runSingleTranslation({
+      blob: new Blob(['x']),
+      fileName: 'clip.wav',
+      targetLanguage: 'th',
+      karaokeEnabled: false,
+      deps: { fetchImpl: brandCheckedFetch.bind(win), signal: ctrl.signal },
+    })
+  ).resolves.toHaveLength(1);
+});
