@@ -172,8 +172,14 @@ export async function POST(req: NextRequest) {
           throw new HttpError(400, 'Upload incomplete.');
         }
 
-        // Final verification: exists and matches
-        const stats = fs.statSync(session.tempPath);
+        // Final verification: exists and matches (stat in try/catch — the
+        // file can vanish between check and read if the cleaner runs).
+        let stats: fs.Stats;
+        try {
+          stats = fs.statSync(session.tempPath);
+        } catch {
+          throw new HttpError(500, 'Upload temp file is missing on server.');
+        }
         if (stats.size !== session.totalSize) {
           throw new HttpError(500, 'Final file size mismatch on server.');
         }

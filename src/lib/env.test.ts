@@ -9,6 +9,7 @@ const KEYS = [
   'FFMPEG_PATH',
   'FFMPEG_HWACCEL',
   'FFMPEG_TIMEOUT_MS',
+  'FFMPEG_MAX_JOBS',
   'CRON_SECRET',
 ] as const;
 
@@ -99,4 +100,30 @@ test('validateEnv accepts a valid FFMPEG_TIMEOUT_MS override', () => {
 test('env.ffmpegTimeoutMs falls back to 4 min on invalid runtime value', () => {
   process.env.FFMPEG_TIMEOUT_MS = 'garbage';
   expect(env.ffmpegTimeoutMs).toBe(DEFAULT_FFMPEG_TIMEOUT_MS);
+});
+
+test('validateEnv applies default FFMPEG_MAX_JOBS', () => {
+  expect(validateEnv().FFMPEG_MAX_JOBS).toBe(1);
+  expect(env.ffmpegMaxJobs).toBe(1);
+});
+
+test('validateEnv throws when FFMPEG_MAX_JOBS is zero', () => {
+  process.env.FFMPEG_MAX_JOBS = '0';
+  expect(() => validateEnv()).toThrow(/FFMPEG_MAX_JOBS/);
+});
+
+test('validateEnv throws when FFMPEG_MAX_JOBS exceeds the ceiling of 4', () => {
+  process.env.FFMPEG_MAX_JOBS = '8';
+  expect(() => validateEnv()).toThrow(/ceiling/);
+});
+
+test('validateEnv accepts a valid FFMPEG_MAX_JOBS override', () => {
+  process.env.FFMPEG_MAX_JOBS = '2';
+  expect(validateEnv().FFMPEG_MAX_JOBS).toBe(2);
+  expect(env.ffmpegMaxJobs).toBe(2);
+});
+
+test('env.ffmpegMaxJobs falls back to 1 on invalid runtime value', () => {
+  process.env.FFMPEG_MAX_JOBS = 'garbage';
+  expect(env.ffmpegMaxJobs).toBe(1);
 });

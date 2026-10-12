@@ -386,8 +386,12 @@ export function mergeChunkSubtitles(
   }
 
   const deduped: SubtitleItem[] = [];
+  // Duplicates only occur at chunk boundaries (1.5s overlap), so comparing
+  // against the last few items is enough — O(n) instead of O(n²).
+  const BOUNDARY_WINDOW = 4;
   for (const item of allItems) {
-    const isDup = deduped.some((prev) => isNearBoundaryDuplicate(prev, item));
+    const recent = deduped.slice(-BOUNDARY_WINDOW);
+    const isDup = recent.some((prev) => isNearBoundaryDuplicate(prev, item));
     if (!isDup) deduped.push(item);
   }
 

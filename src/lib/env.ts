@@ -57,6 +57,17 @@ const envSchema = z.object({
       .default(DEFAULT_FFMPEG_TIMEOUT_MS),
   ),
   CRON_SECRET: z.preprocess(emptyToUndefined, z.string().min(1).max(256).optional()),
+  /** Parallel FFmpeg encoders allowed (default 1 — libx264 already uses every core). */
+  FFMPEG_MAX_JOBS: z.preprocess(
+    emptyToUndefined,
+    z.coerce
+      .number()
+      .int('FFMPEG_MAX_JOBS must be an integer')
+      .min(1, 'FFMPEG_MAX_JOBS must be at least 1')
+      .max(4, 'FFMPEG_MAX_JOBS exceeds the ceiling of 4')
+      .optional()
+      .default(1),
+  ),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
@@ -113,16 +124,28 @@ export const env = {
     if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_MAX_UPLOAD_BYTES;
     return Math.min(parsed, MAX_UPLOAD_BYTES_CEILING);
   },
-  /**
-   * Lazy read (never a module-level const) so tests and runtime env changes
-   * are honored. Falls back to 4 min on missing/invalid values; boot
-   * validation rejects invalid values outright in production.
-   */
-  get ffmpegTimeoutMs(): number {
-    const raw = process.env.FFMPEG_TIMEOUT_MS;
-    if (raw === undefined || raw.trim() === '') return DEFAULT_FFMPEG_TIMEOUT_MS;
-    const parsed = Number(raw);
-    if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_FFMPEG_TIMEOUT_MS;
-    return Math.min(parsed, FFMPEG_TIMEOUT_MS_CEILING);
-  },
-};
+    /**
+     * Lazy read (never a module-level const) so tests and runtime env changes
+     * are honored. Falls back to 1 on missing/invalid values; boot
+     * validation rejects invalid values outright in production.
+     */
+    get ffmpegMaxJobs(): number {
+      const raw = process.env.FFMPEG_MAX_JOBS;
+      if (raw === undefined || raw.trim() === '') return 1;
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1) return 1;
+      return Math.min(parsed, 4);
+    },
+    /**
+     * Lazy read (never a module-level const) so tests and runtime env changes
+     * are honored. Falls back to 4 min on missing/invalid values; boot
+     * validation rejects invalid values outright in production.
+     */
+    get ffmpegTimeoutMs(): number {
+      const raw = process.env.FFMPEG_TIMEOUT_MS;
+      if (raw === undefined || raw.trim() === '') return DEFAULT_FFMPEG_TIMEOUT_MS;
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_FFMPEG_TIMEOUT_MS;
+      return Math.min(parsed, FFMPEG_TIMEOUT_MS_CEILING);
+    },
+  };

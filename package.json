@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"**/*.integration.test.ts\"",
+    "test:integration": "vitest run integration",
+    "test:all": "vitest run",
     "gate": "node scripts/quality-gate.mjs"
   },
   "dependencies": {

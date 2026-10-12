@@ -55,21 +55,25 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Waveform peaks: reuse the shared extraction peaks when available (zero
   // extra decode), otherwise fall back to decoding the file once locally.
+  // Sync branch lives in its own effect: stuffing prop-to-state sync into the
+  // decode effect below would re-trigger decoding logic on every peaks change.
   useEffect(() => {
     if (sharedPeaks && sharedPeaks.length > 0) {
+      // Syncing parent-provided peaks into local state is intentional here.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setPeaks(sharedPeaks);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsDecoding(false);
-      return;
-    }
-    if (!selectedFile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+    } else if (!selectedFile) {
       setPeaks([]);
-      return;
+      setIsDecoding(false);
+    } else {
+      setIsDecoding(true);
     }
+  }, [sharedPeaks, selectedFile]);
+
+  useEffect(() => {
+    if ((sharedPeaks && sharedPeaks.length > 0) || !selectedFile) return;
     let isSubscribed = true;
-    setIsDecoding(true);
 
     selectedFile
       .arrayBuffer()

@@ -22,19 +22,20 @@ import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 
 // Job creation is expensive (spawns FFmpeg + temp files). Limit casual abuse.
-const prepareLimiter = createRateLimiter({ windowMs: 60_000, max: 5 });
+// 10/min leaves room for legitimate retry bursts.
+const prepareLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
 /** Running FFmpeg encoders, so cancel requests can kill the process. */
 const activeEncodes = new Map<string, ChildProcess>();
 
-// Encode one job at a time: FFmpeg spawns saturate every core, so parallel
-// jobs make the whole machine (including other requests) unusable. Queued
-// jobs keep status 'encoding' with their initial progress until their turn.
-const MAX_CONCURRENT_ENCODERS = 1;
+// Encode one job at a time by default: FFmpeg spawns saturate every core, so
+// parallel jobs make the whole machine (including other requests) unusable.
+// Queued jobs keep status 'encoding' with their initial progress until their
+// turn. Machines with cores to spare can raise this via FFMPEG_MAX_JOBS (1-4).
 const pendingEncodes: string[] = [];
 
 function scheduleEncode(jobId: string): void {
-  if (activeEncodes.size >= MAX_CONCURRENT_ENCODERS) {
+  if (activeEncodes.size >= env.ffmpegMaxJobs) {
     pendingEncodes.push(jobId);
     console.log(`[FFmpeg Hardsub] Queued ${jobId} (${pendingEncodes.length} waiting)`);
     return;
