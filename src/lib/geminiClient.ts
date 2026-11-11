@@ -4,16 +4,16 @@ import { env } from './env';
 
 /**
  * Model priority list (highest quota first). Single source of truth for
- * every Gemini-backed route. User quota dashboard informed the ordering.
+ * every Gemini-backed route. Verified live 2026-10-12: only these respond
+ * 200 on this project's keys — gemini-3-flash, 2.5-flash and 2.5-flash-lite
+ * were removed (each cycle wasted seconds in timeouts/backoffs instead of
+ * moving to a working model).
  */
 export const MODELS = [
   'gemini-3.5-flash-lite', // Primary Default (High Quota: 500 RPD, 15 RPM)
   'gemini-3.6-flash',      // High-Precision Model (20 RPD, 5 RPM)
-  'gemini-3-flash',        // (20 RPD, 5 RPM)
   'gemini-3.5-flash',      // (20 RPD, 5 RPM)
-  'gemini-3.1-flash-lite', // (500 RPD, 15 RPM)
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite'
+  'gemini-3.1-flash-lite', // (500 RPD, 15 RPM, slow: ~15s TTFT)
 ];
 
 export function parsePartialOrTruncatedJSON(text: string): unknown {

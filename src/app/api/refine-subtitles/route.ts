@@ -4,6 +4,7 @@ import { requestJSON, SUBTITLE_ARRAY_SCHEMA } from '@/lib/geminiClient';
 import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
 import { readJsonBody, HttpError, createRateLimiter, getClientIp } from '@/lib/security';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
+import { sanitizeForeignNoise } from '@/lib/languageCheck';
 
 export const maxDuration = 300; // Allow up to 5 minutes for large refinement batches
 
@@ -55,7 +56,8 @@ ${promptInstruction}
 CRITICAL RULES:
 1. Preserve exact id, startTime, endTime, and originalText for every subtitle item verbatim (format "HH:MM:SS.mmm").
 2. Improve translatedText to perfectly match the requested style preset.
-3. Keep the output strictly in the requested JSON schema array format.
+3. Every character in translatedText MUST be in 100% pure Thai. Never leave Japanese (Kana/Kanji), Chinese, Korean, or English/Romaji words in translatedText.
+4. Keep the output strictly in the requested JSON schema array format.
 
 Input Subtitles to Refine:
 ${JSON.stringify(batch, null, 2)}`;
@@ -75,7 +77,7 @@ ${JSON.stringify(batch, null, 2)}`;
             startTime: parseTimestampToSeconds(item.startTime),
             endTime: parseTimestampToSeconds(item.endTime),
             originalText: String(item.originalText || '').trim(),
-            translatedText: String(item.translatedText || '').trim(),
+            translatedText: sanitizeForeignNoise(String(item.translatedText || '').trim(), 'th'),
           });
         }
       } catch (batchError: unknown) {

@@ -4,6 +4,7 @@ export interface SubtitleItem {
   endTime: number;        // End time in seconds (e.g. 4.20)
   originalText: string;   // Transcribed original text
   translatedText: string; // Translated text (Thai)
+  source?: 'speech' | 'on_screen_text'; // Source of cue: spoken audio or on-screen visual text
   words?: { text: string; start: number; end: number }[]; // karaoke word timing (optional)
 }
 
@@ -36,3 +37,30 @@ export interface ExportJob {
   /** 6-hex RGB karaoke fill color (defaults to style.primaryColor). */
   highlightColor?: string;
 }
+
+export type TranslationProgressStep =
+  | 'uploading'
+  | 'cloud_upload'
+  | 'processing'
+  | 'generating'
+  | 'fallback'
+  | 'timing'
+  | 'complete';
+
+export type TranslationProgressEvent =
+  | {
+      type: 'progress';
+      step: TranslationProgressStep;
+      message: string;
+      model?: string;
+      fromModel?: string;
+      toModel?: string;
+    }
+  | {
+      type: 'complete';
+      subtitles: SubtitleItem[];
+    }
+  | {
+      type: 'error';
+      message: string;
+    };

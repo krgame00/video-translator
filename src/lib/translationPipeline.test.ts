@@ -160,3 +160,45 @@ test('receiver-sensitive fetch (window.fetch) is called with a valid receiver', 
     })
   ).resolves.toHaveLength(1);
 });
+
+test('runSingleTranslation consumes NDJSON stream and reports progress events', async () => {
+  const events = [
+    JSON.stringify({ type: 'progress', step: 'cloud_upload', message: 'Uploading to Gemini...' }),
+    JSON.stringify({ type: 'progress', step: 'generating', model: 'gemini-3.6-flash', message: 'Generating...' }),
+    JSON.stringify({
+      type: 'complete',
+      subtitles: [{ id: '1', startTime: 0, endTime: 2, originalText: 'Hi', translatedText: 'สวัสดี' }],
+    }),
+  ].join('\n') + '\n';
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(events));
+      controller.close();
+    },
+  });
+
+  const streamFetch = () =>
+    Promise.resolve({
+      ok: true,
+      headers: new Headers({ 'content-type': 'application/x-ndjson' }),
+      body: stream,
+    } as unknown as Response);
+
+  const ctrl = new AbortController();
+  const progressMessages: string[] = [];
+
+  const res = await runSingleTranslation({
+    blob: new Blob(['data']),
+    fileName: 'test.mp4',
+    targetLanguage: 'th',
+    karaokeEnabled: false,
+    onProgress: (evt) => progressMessages.push(evt.message),
+    deps: { fetchImpl: streamFetch as typeof fetch, signal: ctrl.signal },
+  });
+
+  expect(res).toHaveLength(1);
+  expect(res[0].translatedText).toBe('สวัสดี');
+  expect(progressMessages).toEqual(['Uploading to Gemini...', 'Generating...']);
+});

@@ -1,5 +1,5 @@
 import { AudioChunk } from './audioExtractor';
-import { SubtitleItem } from './types';
+import { SubtitleItem, TranslationProgressEvent } from './types';
 
 /**
  * Translation pipeline: chunk fan-out, retry, merge.
@@ -37,6 +37,18 @@ export interface ChunkRunSummary {
 /** True for AbortError from either a real Error or a DOMException-shaped throw. */
 export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
+}
+
+/**
+ * Failures that will fail identically on every retry, so retrying them only
+ * burns quota and leaves the UI spinning. Measured 2026-10-12: a chunk that
+ * blows Gemini's 1M-token input ceiling returns HTTP 400 "input token count
+ * exceeds the maximum", which the server relays verbatim — three client
+ * attempts × four models each, all guaranteed to fail the same way.
+ */
+export function isNonRetryableChunkError(err: unknown): boolean {
+  const msg = (err instanceof Error && err.message) || String(err);
+  return /input token count exceeds|exceeds the maximum number of tokens|413|Payload Too Large/i.test(msg);
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -144,13 +156,15 @@ export async function runChunkedTranslation(
   return { results, failedChunkIndexes };
 }
 
-/** Single-clip path: one audio payload posted to the whole-file endpoint. */
+/** Single-clip path: one audio/video payload posted to the whole-file endpoint. */
 export async function runSingleTranslation(
   opts: {
     blob: Blob;
     fileName: string;
     targetLanguage: string;
     karaokeEnabled: boolean;
+    includeOnScreenText?: boolean;
+    onProgress?: (event: Extract<TranslationProgressEvent, { type: 'progress' }>) => void;
     deps: PipelineDeps;
   }
 ): Promise<SubtitleItem[]> {
@@ -158,12 +172,58 @@ export async function runSingleTranslation(
   formData.append('file', opts.blob, opts.fileName);
   formData.append('targetLanguage', opts.targetLanguage);
   formData.append('wordTiming', opts.karaokeEnabled ? '1' : '0');
+  if (opts.includeOnScreenText) {
+    formData.append('includeOnScreenText', '1');
+  }
 
   const res = await opts.deps.fetchImpl('/api/video-translate', {
     method: 'POST',
     body: formData,
+    headers: {
+      Accept: 'application/x-ndjson, application/json',
+    },
     signal: opts.deps.signal,
   });
+
+  const contentType = res.headers?.get?.('content-type') || '';
+
+  if (contentType.includes('application/x-ndjson') && res.body) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalSubtitles: SubtitleItem[] | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed) as TranslationProgressEvent;
+          if (event.type === 'progress') {
+            opts.onProgress?.(event);
+          } else if (event.type === 'complete') {
+            finalSubtitles = event.subtitles;
+          } else if (event.type === 'error') {
+            throw new Error(event.message);
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message !== 'Unexpected end of JSON input') {
+            throw err;
+          }
+        }
+      }
+    }
+
+    if (finalSubtitles) return finalSubtitles;
+    throw new Error('Server closed connection before returning completed subtitles.');
+  }
+
   const data = (await res.json()) as { success?: boolean; error?: string; subtitles?: SubtitleItem[] };
   if (!data.success) throw new Error(data.error || 'Failed to transcribe and translate video.');
   return data.subtitles || [];

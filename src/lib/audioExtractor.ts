@@ -17,9 +17,17 @@ export interface ExtractionResult {
 const PEAK_POINTS = 600;
 
 /**
- * Browser-side Web Audio API Audio Extractor
- * Extracts light 16kHz mono WAV audio from any input video/audio file in seconds.
+ * Gemini charges audio by CONTENT, not duration: the token ceiling is hit by
+ * dense speech long before a quiet stretch of the same length (measured on the
+ * same video — 42s at offset 0 passed, the same 42s at offset 60 failed with
+ * "input token count exceeds the maximum").
+ *
+ * 8kHz mono halves the payload versus 16kHz and still transcribes speech
+ * accurately (verified against real dialogue), which buys roughly 2x the
+ * seconds per request. Paired with the 150s chunk this keeps every request
+ * inside the 1M-token limit for ordinary content.
  */
+const TARGET_SAMPLE_RATE = 8000;
 export async function extractAudioFromVideo(file: File): Promise<Blob> {
   if (file.size > 500 * 1024 * 1024) {
     console.warn(`[Audio Extractor] Large file detected (${(file.size / 1024 / 1024).toFixed(0)}MB > 500MB). Client extraction may require significant RAM.`);
@@ -29,11 +37,11 @@ export async function extractAudioFromVideo(file: File): Promise<Blob> {
   const dummyCtx = new OfflineAudioContext(1, 16000, 16000);
   const audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
 
-  const targetSampleRate = 16000;
-  const duration = audioBuffer.duration;
-  const targetLength = Math.ceil(duration * targetSampleRate);
+  const targetSampleRate = TARGET_SAMPLE_RATE;
+    const duration = audioBuffer.duration;
+    const targetLength = Math.ceil(duration * targetSampleRate);
 
-  const offlineCtx = new OfflineAudioContext(1, targetLength, targetSampleRate);
+    const offlineCtx = new OfflineAudioContext(1, targetLength, targetSampleRate);
   const source = offlineCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(offlineCtx.destination);
@@ -43,9 +51,11 @@ export async function extractAudioFromVideo(file: File): Promise<Blob> {
   return encodeWAV(renderedBuffer.getChannelData(0), targetSampleRate);
 }
 
+// Default chunk length: 150s of 16kHz mono WAV ≈ 4.7MB, safely inside
+// Gemini's 1M-token input limit (300s ≈ 9.4MB overflows it).
 export async function extractAudioChunks(
   file: File,
-  chunkDurationSecs: number = 300
+  chunkDurationSecs: number = 150
 ): Promise<ExtractionResult> {
   let audioBuffer: AudioBuffer;
 
@@ -64,7 +74,7 @@ export async function extractAudioChunks(
     throw new Error(`Browser failed to decode audio track: ${errMsg}`);
   }
 
-  const targetSampleRate = 16000;
+  const targetSampleRate = TARGET_SAMPLE_RATE;
   const duration = audioBuffer.duration;
   const rawPeaks: number[] = [];
 

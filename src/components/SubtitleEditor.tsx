@@ -4,9 +4,10 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { SubtitleItem } from '@/lib/types';
 import { SubtitleItemCard } from './SubtitleItemCard';
-import { Plus, ArrowDownAZ, RefreshCw, Eye, EyeOff, Sparkles, Loader2, FileText, Languages, Search, Replace, X } from 'lucide-react';
+import { Plus, ArrowDownAZ, RefreshCw, Eye, EyeOff, Sparkles, Loader2, FileText, Languages, Search, Replace, X, AlertTriangle } from 'lucide-react';
 import { parseSRT } from '@/lib/srtFormatter';
 import { searchSubtitles, findAndReplaceSubtitles, findActiveSubtitle, splitSubtitleItem } from '@/lib/subtitleUtils';
+import { hasLanguageLeakage } from '@/lib/languageCheck';
 
 interface SubtitleEditorProps {
   subtitles: SubtitleItem[];
@@ -33,6 +34,8 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   const [selectedStyle, setSelectedStyle] = useState<string>('anime');
   const [isRefining, setIsRefining] = useState<boolean>(false);
   const [isTranslatingSRT, setIsTranslatingSRT] = useState<boolean>(false);
+  const [isFixingLeakage, setIsFixingLeakage] = useState<boolean>(false);
+  const [filterLeakedOnly, setFilterLeakedOnly] = useState<boolean>(false);
 
   // Search & Find-Replace States
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -41,12 +44,19 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   const [replaceText, setReplaceText] = useState<string>('');
   const [matchCase, setMatchCase] = useState<boolean>(false);
 
-  // Compute the filtered list ONCE per render (it was previously computed
-  // twice: once for the match counter, once for the list itself).
-  const filteredSubtitles = useMemo(
-    () => searchSubtitles(subtitles, searchQuery),
-    [subtitles, searchQuery]
+  const leakedCount = useMemo(
+    () => subtitles.filter((s) => s.translatedText.trim().length > 0 && hasLanguageLeakage(s.translatedText, targetLanguage)).length,
+    [subtitles, targetLanguage]
   );
+
+  // Compute the filtered list ONCE per render
+  const filteredSubtitles = useMemo(() => {
+    let list = searchSubtitles(subtitles, searchQuery);
+    if (filterLeakedOnly) {
+      list = list.filter((s) => s.translatedText.trim().length > 0 && hasLanguageLeakage(s.translatedText, targetLanguage));
+    }
+    return list;
+  }, [subtitles, searchQuery, filterLeakedOnly, targetLanguage]);
 
   const handleExecuteReplace = useCallback(() => {
     if (!findText) return;
@@ -146,6 +156,32 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       setIsRefining(false);
     }
   }, [subtitles, selectedStyle, onSubtitlesChange, notify]);
+
+  const handleFixLeakage = useCallback(async () => {
+    if (subtitles.length === 0 || leakedCount === 0) return;
+    setIsFixingLeakage(true);
+    try {
+      const res = await fetch('/api/fix-leakage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subtitles, targetLanguage }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to fix language leakage.');
+      }
+      onSubtitlesChange(data.subtitles || []);
+      notify?.(
+        `แก้ไขและแปลภาษาอื่นที่หลุดสำเร็จ ${data.fixedCount} จุด`,
+        'success'
+      );
+    } catch (err: unknown) {
+      const errMessage = err instanceof Error ? err.message : String(err);
+      notify?.(`แก้ไขภาษาอื่นล้มเหลว: ${errMessage}`, 'error');
+    } finally {
+      setIsFixingLeakage(false);
+    }
+  }, [subtitles, targetLanguage, leakedCount, onSubtitlesChange, notify]);
 
   // Find current active subtitle item (binary search; list is sorted by time)
   const activeSubtitleId = useMemo(
@@ -304,6 +340,23 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
             </button>
           )}
 
+          {/* Fix Language Leakage Button */}
+          {subtitles.length > 0 && leakedCount > 0 && (
+            <button
+              disabled={isFixingLeakage}
+              onClick={handleFixLeakage}
+              className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 hover:bg-amber-500/30 text-amber-300 text-xs font-medium flex items-center gap-1.5 disabled:opacity-50 transition-all shrink-0"
+              title={`ตรวจพบภาษาอื่นหลุด ${leakedCount} จุด คลิกเพื่อให้ AI แปลแก้ไขเป็นภาษาที่ถูกต้อง`}
+            >
+              {isFixingLeakage ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+              ) : (
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+              )}
+              <span>แปลแก้ภาษาอื่น ({leakedCount})</span>
+            </button>
+          )}
+
           {/* Find & Replace Toggle Button */}
           {subtitles.length > 0 && (
             <button
@@ -374,6 +427,22 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
                 {filteredSubtitles.length} / {subtitles.length} matches
               </span>
             )}
+            {leakedCount > 0 && (
+              <button
+                onClick={() => setFilterLeakedOnly(!filterLeakedOnly)}
+                aria-pressed={filterLeakedOnly}
+                className={`px-2.5 py-1.5 rounded-xl border text-xs flex items-center gap-1.5 transition-all shrink-0 ${
+                  filterLeakedOnly
+                    ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
+                    : 'bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-amber-300 hover:border-amber-500/40'
+                }`}
+                title="แสดงเฉพาะซับไตเติลที่มีภาษาอื่นหลุดมา"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden sm:inline">เฉพาะภาษาอื่นปน</span>
+                <span className="font-mono text-amber-400">({leakedCount})</span>
+              </button>
+            )}
           </div>
 
           {/* Expanded Find & Replace Bar */}
@@ -442,6 +511,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
                   onDelete={handleDelete}
                   onJumpTo={onJumpTo}
                   onSplit={handleSplit}
+                  targetLanguage={targetLanguage}
                 />
               </div>
             )}

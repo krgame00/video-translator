@@ -4,6 +4,7 @@ import { requestJSON, SUBTITLE_ARRAY_SCHEMA } from '@/lib/geminiClient';
 import { triggerBackgroundTempCleanup } from '@/lib/tempCleaner';
 import { readJsonBody, HttpError, createRateLimiter, getClientIp } from '@/lib/security';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
+import { sanitizeForeignNoise } from '@/lib/languageCheck';
 
 export const maxDuration = 300; // Allow up to 5 minutes for large SRT batches
 
@@ -42,13 +43,16 @@ export async function POST(req: NextRequest) {
     for (let i = 0; i < subtitles.length; i += BATCH_SIZE) {
       const batch = subtitles.slice(i, i + BATCH_SIZE);
 
-      const prompt = `You are a Professional Subtitle Translator.
-Your task is to translate the originalText of each subtitle item into natural, high-quality ${langName}.
+      const prompt = `You are a World-Class Professional Subtitle Translator.
+Your task is to translate the originalText of each subtitle item into natural, high-quality, pure ${langName}.
 
-CRITICAL REQUIREMENTS:
+CRITICAL ZERO-LEAKAGE REQUIREMENTS:
 1. Preserve exact id, startTime, and endTime for every subtitle item verbatim (format "HH:MM:SS.mmm").
 2. Store the original text in originalText and the newly translated text in translatedText.
-3. Keep the output strictly in the requested JSON schema array format.
+3. 'translatedText' MUST be 100% in ${langName}. Never leave Japanese (Kanji/Kana), Chinese, Korean, or English words in 'translatedText'.
+4. Transliterate all character names, places, and titles phonetically into ${langName} script.
+5. Translate all sighs, screams, moans, laughter, and sound effects into natural ${langName} expressions.
+6. Keep the output strictly in the requested JSON schema array format.
 
 Input Subtitles to Translate:
 ${JSON.stringify(batch, null, 2)}`;
@@ -68,7 +72,7 @@ ${JSON.stringify(batch, null, 2)}`;
             startTime: parseTimestampToSeconds(item.startTime),
             endTime: parseTimestampToSeconds(item.endTime),
             originalText: String(item.originalText || '').trim(),
-            translatedText: String(item.translatedText || '').trim(),
+            translatedText: sanitizeForeignNoise(String(item.translatedText || '').trim(), targetLanguage),
           });
         }
       } catch (batchError: unknown) {

@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processVideoSubtitlesFromStream } from '@/lib/geminiVideoService';
 import { assertContentLength, HttpError, createRateLimiter, getClientIp } from '@/lib/security';
+import { TranslationProgressEvent } from '@/lib/types';
 
 // Each request uploads a full media file to Gemini — expensive. Guard quota.
 const translateLimiter = createRateLimiter({ windowMs: 60_000, max: 3 });
 
-export const maxDuration = 300; // Allow up to 5 minutes for video processing
+export const maxDuration = 600; // Allow up to 10 minutes for full-video multimodal processing
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,6 +22,7 @@ export async function POST(req: NextRequest) {
     const file = formData.get('file') as File | null;
     const targetLanguage = (formData.get('targetLanguage') as string) || 'th';
     const wordTiming = formData.get('wordTiming') === '1';
+    const includeOnScreenText = formData.get('includeOnScreenText') === '1';
 
     if (!file) {
       return NextResponse.json(
@@ -38,6 +40,51 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const wantsStream = req.headers.get('accept')?.includes('application/x-ndjson');
+
+    if (wantsStream) {
+      const encoder = new TextEncoder();
+      const transform = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = transform.writable.getWriter();
+
+      const emit = async (event: TranslationProgressEvent) => {
+        try {
+          await writer.write(encoder.encode(JSON.stringify(event) + '\n'));
+        } catch {}
+      };
+
+      (async () => {
+        try {
+          const subtitles = await processVideoSubtitlesFromStream(
+            file.stream() as unknown as ReadableStream<Uint8Array>,
+            file.type || 'video/mp4',
+            file.name,
+            targetLanguage,
+            req.signal,
+            wordTiming,
+            includeOnScreenText,
+            emit
+          );
+          await emit({ type: 'complete', subtitles });
+        } catch (err: unknown) {
+          const errMessage = err instanceof Error ? err.message : String(err);
+          await emit({ type: 'error', message: errMessage || 'An unexpected error occurred during processing.' });
+        } finally {
+          try {
+            await writer.close();
+          } catch {}
+        }
+      })();
+
+      return new Response(transform.readable, {
+        headers: {
+          'Content-Type': 'application/x-ndjson; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
     // Stream file contents directly to disk to consume near-zero Node memory
     const subtitles = await processVideoSubtitlesFromStream(
       file.stream() as unknown as ReadableStream<Uint8Array>,
@@ -45,7 +92,8 @@ export async function POST(req: NextRequest) {
       file.name,
       targetLanguage,
       req.signal,
-      wordTiming
+      wordTiming,
+      includeOnScreenText
     );
 
     return NextResponse.json({

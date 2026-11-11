@@ -16,6 +16,7 @@ import { runChunkedTranslation, runSingleTranslation } from '@/lib/translationPi
 
 const SUBTITLES_STORAGE_KEY = 'video_translator_subtitles';
 const KARAOKE_STORAGE_KEY = 'karaoke_enabled';
+const ON_SCREEN_TEXT_STORAGE_KEY = 'on_screen_text_enabled';
 // Text-edit bursts within this window collapse into one undo step.
 const HISTORY_BURST_MS = 800;
 
@@ -32,6 +33,8 @@ export default function Home() {
   const [subStyle, setSubStyle] = useState<SubtitleStyleSettings>(DEFAULT_SUBTITLE_STYLE);
   // Karaoke word-highlight generation (opt-in, costs one extra AI pass/chunk)
   const [karaokeEnabled, setKaraokeEnabled] = useState(false);
+  // Full video OCR for on-screen text/captions
+  const [includeOnScreenText, setIncludeOnScreenText] = useState(false);
   // Waveform peaks computed during audio extraction — the Timeline reuses
   // them instead of re-reading and re-decoding the whole file a second time.
   const [waveformPeaks, setWaveformPeaks] = useState<number[]>([]);
@@ -67,6 +70,7 @@ export default function Home() {
     queueMicrotask(() => {
       setSubStyle(loadSubtitleStyle());
       setKaraokeEnabled(localStorage.getItem(KARAOKE_STORAGE_KEY) === '1');
+      setIncludeOnScreenText(localStorage.getItem(ON_SCREEN_TEXT_STORAGE_KEY) === '1');
     });
   }, []);
 
@@ -81,6 +85,14 @@ export default function Home() {
     setKaraokeEnabled((prev) => {
       const next = !prev;
       try { localStorage.setItem(KARAOKE_STORAGE_KEY, next ? '1' : '0'); } catch {}
+      return next;
+    });
+  }, []);
+
+  const handleOnScreenTextToggle = useCallback(() => {
+    setIncludeOnScreenText((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(ON_SCREEN_TEXT_STORAGE_KEY, next ? '1' : '0'); } catch {}
       return next;
     });
   }, []);
@@ -215,15 +227,53 @@ export default function Home() {
     if (!selectedFile) return;
 
     const controller = new AbortController();
+    const estimatedSecsForRun = includeOnScreenText
+      ? Math.max(180, Math.round((videoDuration || 600) * 0.2 + 60))
+      : estimatedTotalSecs;
+
     dispatch({ type: 'START_TRANSLATION', payload: {
-      estimatedSecs: estimatedTotalSecs,
-      statusMessage: 'กำลังสกัดเฉพาะแทร็กเสียงและแบ่งท่อนเพื่อความเร็วระดับสูงสุด...',
+      estimatedSecs: estimatedSecsForRun,
+      statusMessage: includeOnScreenText
+        ? 'กำลังเตรียมส่งวิดีโอตัวเต็มเพื่อตรวจจับทั้งเสียงและข้อความบนภาพ...'
+        : 'กำลังสกัดเฉพาะแทร็กเสียงและแบ่งท่อนเพื่อความเร็วระดับสูงสุด...',
       controller,
     } });
     dispatch({ type: 'SET_TOAST', payload: { msg: 'Starting AI translation…', type: 'info' } });
 
     try {
-      const { chunks, peaks: extractedPeaks } = await extractAudioChunks(selectedFile, 300);
+      const isVideo = selectedFile.type.startsWith('video/') || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(selectedFile.name);
+
+      if (includeOnScreenText && isVideo) {
+        dispatch({ type: 'UPDATE_PROGRESS', payload: {
+          statusMessage: 'กำลังอัปโหลดวิดีโอตัวเต็มไปยัง Gemini AI เพื่อตรวจจับทั้งเสียงพูดและตัวหนังสือบนจอภาพ (OCR)...'
+        } });
+
+        const subtitles = await runSingleTranslation({
+          blob: selectedFile,
+          fileName: selectedFile.name,
+          targetLanguage,
+          karaokeEnabled,
+          includeOnScreenText: true,
+          onProgress: (evt) => {
+            dispatch({
+              type: 'UPDATE_PROGRESS',
+              payload: { statusMessage: evt.message },
+            });
+          },
+          deps: { fetchImpl: fetch.bind(window), signal: controller.signal },
+        });
+
+        if (!controller.signal.aborted) {
+          dispatch({ type: 'TRANSLATION_SUCCESS', payload: subtitles });
+        }
+        return;
+      }
+
+      // 300s of 16kHz mono WAV is ~9.4MB, which exceeds Gemini's 1M-token
+      // input limit (measured: 30s passes, 60s fails with "input token count
+      // exceeds the maximum"). 150s keeps every chunk well inside the limit
+      // while staying long enough for cheap per-request overhead.
+      const { chunks, peaks: extractedPeaks } = await extractAudioChunks(selectedFile, 150);
       setWaveformPeaks(extractedPeaks);
       console.log(`[Audio Chunker] Total chunks created: ${chunks.length}`);
 
@@ -263,12 +313,18 @@ export default function Home() {
         const fileNameToSend = selectedFile.name.replace(/\.[^/.]+$/, "") + ".wav";
 
         const subtitles = await runSingleTranslation({
-                  blob: fileToSend,
-                  fileName: fileNameToSend,
-                  targetLanguage,
-                  karaokeEnabled,
-                  deps: { fetchImpl: fetch.bind(window), signal: controller.signal },
-                });
+          blob: fileToSend,
+          fileName: fileNameToSend,
+          targetLanguage,
+          karaokeEnabled,
+          onProgress: (evt) => {
+            dispatch({
+              type: 'UPDATE_PROGRESS',
+              payload: { statusMessage: evt.message },
+            });
+          },
+          deps: { fetchImpl: fetch.bind(window), signal: controller.signal },
+        });
 
         if (!controller.signal.aborted) {
           dispatch({ type: 'TRANSLATION_SUCCESS', payload: subtitles });
@@ -282,7 +338,7 @@ export default function Home() {
         dispatch({ type: 'TRANSLATION_ERROR', payload: err instanceof Error ? err.message : 'An error occurred during translation.' });
       }
     }
-  }, [selectedFile, targetLanguage, estimatedTotalSecs, karaokeEnabled]);
+  }, [selectedFile, targetLanguage, estimatedTotalSecs, karaokeEnabled, includeOnScreenText, videoDuration]);
 
   const handleJumpToTime = useCallback((time: number) => {
     dispatch({ type: 'SET_SEEK_TIME', payload: time });
@@ -436,6 +492,23 @@ export default function Home() {
             >
               <MicVocal className="w-4 h-4" />
               <span className="hidden xl:inline">ไฮไลต์ทีละคำ</span>
+            </button>
+          )}
+
+          {selectedFile && (
+            <button
+              onClick={handleOnScreenTextToggle}
+              aria-pressed={includeOnScreenText}
+              className={`px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border ${
+                includeOnScreenText
+                  ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)]'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+              title="แปลข้อความบนจอภาพด้วย (Full Video OCR) — ส่งวิดีโอตัวเต็มให้ Gemini สแกนทั้งเสียงและป้ายข้อความ/ซับในภาพ"
+            >
+              <Sparkles className="w-4 h-4 text-cyan-400" />
+              <span className="hidden xl:inline">แปลข้อความบนจอ (OCR)</span>
+              <span className="xl:hidden">OCR</span>
             </button>
           )}
         </div>

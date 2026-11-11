@@ -2,7 +2,8 @@
 
 import React from 'react';
 import { SubtitleItem } from '@/lib/types';
-import { Play, Trash2, Clock, Scissors } from 'lucide-react';
+import { Play, Trash2, Clock, Scissors, AlertTriangle } from 'lucide-react';
+import { hasLanguageLeakage, getLanguageLeakageReason } from '@/lib/languageCheck';
 
 interface SubtitleItemCardProps {
   item: SubtitleItem;
@@ -11,6 +12,7 @@ interface SubtitleItemCardProps {
   onDelete: (id: string) => void;
   onJumpTo: (time: number) => void;
   onSplit?: (id: string) => void;
+  targetLanguage?: string;
 }
 
 /**
@@ -24,7 +26,14 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
   onDelete,
   onJumpTo,
   onSplit,
+  targetLanguage = 'th',
 }) {
+  const leakageReason = React.useMemo(() => {
+    return item.translatedText.trim().length > 0 && hasLanguageLeakage(item.translatedText, targetLanguage)
+      ? getLanguageLeakageReason(item.translatedText, targetLanguage)
+      : null;
+  }, [item.translatedText, targetLanguage]);
+
   return (
     <div
       className={`group relative rounded-xl border p-4 transition-all duration-200 ${
@@ -75,6 +84,25 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
             />
             <span className="text-zinc-500 text-[10px]">s</span>
           </div>
+
+          {item.source === 'on_screen_text' && (
+            <span
+              className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+              title="ข้อความที่ตรวจพบบนจอภาพ (On-screen text / OCR)"
+            >
+              OCR
+            </span>
+          )}
+
+          {leakageReason && (
+            <span
+              className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1"
+              title={leakageReason}
+            >
+              <AlertTriangle className="w-2.5 h-2.5" />
+              <span>มีภาษาอื่นปน</span>
+            </span>
+          )}
         </div>
 
         {/* Split + Delete Buttons (Always visible on touch, hover on desktop) */}

@@ -1,11 +1,11 @@
 import { GoogleGenAI } from '@google/genai';
 import { MODELS, parsePartialOrTruncatedJSON, requestJSON, Type } from './geminiClient';
-import { SubtitleItem } from './types';
+import { SubtitleItem, TranslationProgressEvent } from './types';
 import { parseTimestampToSeconds, sanitizeAndFixOverlaps, clampSubtitlesToDuration } from './srtFormatter';
 import { env } from './env';
 import { getTempRoot } from './security';
 import { pumpToWriteStream } from './streamPump';
-import { hasThaiChars } from './languageCheck';
+import { hasLanguageLeakage, sanitizeForeignNoise } from './languageCheck';
 import { validateWordTimings, interpolateWords, distributeWordsByChars, type WordTiming } from './wordTiming';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -17,6 +17,7 @@ interface GeminiRawSubtitleItem {
   endTime: string;
   originalText: string;
   translatedText: string;
+  source?: 'speech' | 'on_screen_text';
   text?: string; // fallback field sometimes returned by model
 }
 
@@ -147,7 +148,9 @@ export async function processVideoSubtitlesFromStream(
   fileName: string,
   targetLanguage: string = 'th',
   signal?: AbortSignal,
-  wordTiming: boolean = false
+  wordTiming: boolean = false,
+  includeOnScreenText: boolean = false,
+  onProgress?: (event: TranslationProgressEvent) => void
 ): Promise<SubtitleItem[]> {
   const apiKeys = env.apiKeys;
   if (apiKeys.length === 0) {
@@ -159,6 +162,12 @@ export async function processVideoSubtitlesFromStream(
   const safeFileName = `video_sub_${Date.now()}${ext}`;
   const tempDir = getTempRoot();
   const tempFilePath = path.join(tempDir, safeFileName);
+
+  onProgress?.({
+    type: 'progress',
+    step: 'uploading',
+    message: 'กำลังรับไฟล์และจัดเก็บข้อมูลชั่วคราวบนเซิร์ฟเวอร์...',
+  });
 
   // Stream file chunks directly to disk with a hard byte cap (guards against
   // chunked-transfer bodies that arrive without a content-length header) and
@@ -184,41 +193,53 @@ export async function processVideoSubtitlesFromStream(
   try {
     for (const apiKey of apiKeys) {
       const ai = new GoogleGenAI({ apiKey });
+      let uploadedFile: { name: string; uri: string } | null = null;
 
-      for (const modelName of MODELS) {
-        let uploadedFile;
-        try {
-          // 2. Upload file using Gemini File API
-          uploadedFile = await ai.files.upload({
-            file: tempFilePath,
-            config: {
-              mimeType: mimeType,
-              displayName: safeFileName,
-            },
-          });
+      try {
+        onProgress?.({
+          type: 'progress',
+          step: 'cloud_upload',
+          message: 'กำลังอัปโหลดไฟล์ไปยัง Google Gemini Cloud...',
+        });
 
-          if (!uploadedFile.name || !uploadedFile.uri) {
-            throw new Error('Gemini File upload did not return valid file details.');
+        // 2. Upload file once using Gemini File API for this API key
+        const uploadRes = await ai.files.upload({
+          file: tempFilePath,
+          config: {
+            mimeType: mimeType,
+            displayName: safeFileName,
+          },
+        });
+
+        if (!uploadRes.name || !uploadRes.uri) {
+          throw new Error('Gemini File upload did not return valid file details.');
+        }
+        uploadedFile = { name: uploadRes.name, uri: uploadRes.uri };
+
+        const fileNameOnGemini = uploadedFile.name;
+
+        onProgress?.({
+          type: 'progress',
+          step: 'processing',
+          message: 'รอคลาวด์ Gemini ตรวจสอบและประมวลผลไฟล์วิดีโอ...',
+        });
+
+        // Wait for file processing if needed (bounded to 5 minutes so a
+        // stuck Gemini-side state cannot hang the request forever)
+        const processingDeadline = Date.now() + 5 * 60 * 1000;
+        let fileState = await ai.files.get({ name: fileNameOnGemini });
+        while (fileState.state === 'PROCESSING') {
+          if (Date.now() > processingDeadline) {
+            throw new Error('Gemini file processing timed out after 5 minutes.');
           }
+          if (signal?.aborted) throw new Error('Client disconnected during Gemini file processing.');
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          fileState = await ai.files.get({ name: fileNameOnGemini });
+        }
 
-          const fileNameOnGemini = uploadedFile.name;
-
-          // Wait for file processing if needed (bounded to 5 minutes so a
-          // stuck Gemini-side state cannot hang the request forever)
-          const processingDeadline = Date.now() + 5 * 60 * 1000;
-          let fileState = await ai.files.get({ name: fileNameOnGemini });
-          while (fileState.state === 'PROCESSING') {
-            if (Date.now() > processingDeadline) {
-              throw new Error('Gemini file processing timed out after 5 minutes.');
-            }
-            if (signal?.aborted) throw new Error('Client disconnected during Gemini file processing.');
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-            fileState = await ai.files.get({ name: fileNameOnGemini });
-          }
-
-          if (fileState.state === 'FAILED') {
-            throw new Error('File processing failed on Gemini servers.');
-          }
+        if (fileState.state === 'FAILED') {
+          throw new Error('File processing failed on Gemini servers.');
+        }
 
           // 3. Language configuration & prompt construction
           const langMap: Record<string, { name: string; local: string }> = {
@@ -230,14 +251,21 @@ export async function processVideoSubtitlesFromStream(
           };
           const langConfig = langMap[targetLanguage] || { name: targetLanguage, local: targetLanguage };
 
-          const prompt = `You are a World-Class Professional Subtitle Translator & Synchronizer.
-Your task is to transcribe the spoken speech in the audio/video file into 'originalText' and TRANSLATE it into ${langConfig.name} (${langConfig.local}) for 'translatedText'.
+          const isVideo = mimeType.startsWith('video/') || includeOnScreenText;
+          const prompt = `You are a World-Class Professional Video & Audio Subtitle Translator & Synchronizer.
+Your task is to:
+1. Transcribe all SPOKEN SPEECH in the media into 'originalText' (set 'source': 'speech') and TRANSLATE it into ${langConfig.name} (${langConfig.local}) for 'translatedText'.
+${isVideo ? `2. ALSO DETECT AND TRANSLATE ALL VISIBLE ON-SCREEN TEXT (burned-in subtitles, Japanese/English hardsubs, captions, signs, title cards, on-screen text overlays) into 'originalText' (set 'source': 'on_screen_text') and TRANSLATE it into ${langConfig.name} (${langConfig.local}) for 'translatedText'.
+   - For on-screen text, set startTime and endTime to the exact interval the text appears and disappears on screen.` : ''}
 
-CRITICAL LANGUAGE REQUIREMENT (MUST FOLLOW):
-1. 'originalText': Transcribe the EXACT spoken audio in its original spoken language (e.g., Japanese/English/Chinese).
-2. 'translatedText': You MUST translate every single sentence into ${langConfig.name} (${langConfig.local}) language ONLY.
-   - If target language is Thai, 'translatedText' MUST BE IN THAI (${langConfig.local}).
-   - DO NOT output English, Japanese, or any other language in 'translatedText' when target language is ${langConfig.name}!
+CRITICAL ZERO-LEAKAGE LANGUAGE REQUIREMENT (HIGHEST PRIORITY):
+1. 'originalText': Transcribe the EXACT spoken speech or visible on-screen text in its original source language (e.g. Japanese/English/Chinese).
+2. 'translatedText': MUST BE 100% PURE ${langConfig.name} (${langConfig.local}).
+   - ABSOLUTELY ZERO FOREIGN CHARACTERS: Never leave Japanese (Kanji, Hiragana, Katakana), Chinese, Korean, or English words in 'translatedText' when target is ${langConfig.name}!
+   - NAMES & PROPER NOUNS: Transliterate ALL character names, place names, and titles into phonetically natural ${langConfig.name} script (e.g. เรมิเอล, เซนไป, ยามาดะ). Never keep them in Japanese or Latin/Romaji!
+   - EMOTIONS, MOANS & SFX: Translate or express ALL sighs, gasps, moans, screams, laughter, cries, and sound effects into natural ${langConfig.name} words (e.g. in Thai: อ่า..., อือ..., เฮือก, ฮ่าๆ, อ๊าย, ไม่นะ). NEVER leave them in English ("Ahhh", "Ugh", "Kyaa") or Japanese ("あっ", "あんっ", "いや", "だめ")!
+   - ON-SCREEN TEXT & HARDSUBS: Translate all visible text overlays, titles, signs, and burned-in captions completely into ${langConfig.name}. Never copy raw foreign text into 'translatedText'.
+   - ZERO MIXED PHRASES: Every single word must be in ${langConfig.name}. No mixed Japanese-Thai or English-Thai phrases!
 
 CRITICAL REQUIREMENTS FOR TIMESTAMP ACCURACY & FULL DURATION COVERAGE:
 1. Cover the ENTIRE audio/video file duration from 00:00:00.000 to the end of the video (even if 20+ minutes long). Do NOT stop early or truncate timeline.
@@ -250,21 +278,34 @@ CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
 5. Break speech at sentence or clause boundaries (pauses / intonation). One complete idea per cue.
 6. Keep each cue to at most 2 visual lines: ~40 characters for Thai, ~10-12 words for languages with spaces.
 7. NEVER split a word across lines or cues. For Thai (no spaces between words), always end a cue at a phrase boundary — never mid-word.
-8. Ignore long silent sections or background music without speech.
+8. Ignore long silent sections or background music without speech or visible text.
 9. Output strictly formatted according to the requested JSON schema.
 
-CRITICAL SPEECH-SYNC RULES (HIGHEST PRIORITY):
-A. 'startTime' = the exact instant the FIRST syllable of that cue is spoken. 'endTime' = the exact instant the LAST syllable FINISHES. Never start a cue before its speech begins; never let a cue linger after its speech ends.
+CRITICAL SYNC RULES (HIGHEST PRIORITY):
+A. 'startTime' = the exact instant the FIRST syllable is spoken or text appears on screen. 'endTime' = the exact instant the LAST syllable FINISHES or text disappears. Never start a cue before its speech begins; never let a cue linger after its speech ends.
 B. If a sentence contains an internal silent pause longer than 0.8 seconds, split it into TWO cues AT the pause. Never let one cue span a silent gap.
-C. Timestamps must follow the ACTUAL speech rhythm you hear — not proportional guesses. A sentence spoken quickly gets a short cue even if it has many characters; a slowly-spoken short phrase gets a longer cue.`;
+C. Timestamps must follow the ACTUAL speech or visual rhythm you observe — not proportional guesses.`;
 
-          const response = await ai.models.generateContent({
+        const validFile = uploadedFile;
+        if (!validFile) throw new Error('File upload to Gemini failed.');
+
+        for (let mIdx = 0; mIdx < MODELS.length; mIdx++) {
+          const modelName = MODELS[mIdx];
+          onProgress?.({
+            type: 'progress',
+            step: 'generating',
             model: modelName,
+            message: `กำลังส่งให้โมเดล ${modelName} วิเคราะห์และแปลภาษา...`,
+          });
+
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
             contents: [
               {
                 fileData: {
-                  fileUri: uploadedFile.uri,
-                  mimeType: uploadedFile.mimeType || mimeType,
+                  fileUri: validFile.uri,
+                  mimeType: mimeType,
                 },
               },
               prompt,
@@ -283,6 +324,7 @@ C. Timestamps must follow the ACTUAL speech rhythm you hear — not proportional
                     endTime: { type: Type.STRING },
                     originalText: { type: Type.STRING },
                     translatedText: { type: Type.STRING },
+                    source: { type: Type.STRING },
                   },
                   required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
                 },
@@ -313,6 +355,7 @@ C. Timestamps must follow the ACTUAL speech rhythm you hear — not proportional
                 endTime: Math.max(0, Number(validEnd.toFixed(3))),
                 originalText: String(item.originalText || '').trim(),
                 translatedText: String(item.translatedText || item.text || '').trim(),
+                source: item.source === 'on_screen_text' ? ('on_screen_text' as const) : ('speech' as const),
               };
             })
             .filter((item) => item.translatedText.length > 0);
@@ -346,8 +389,8 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
                   contents: [
                     {
                       fileData: {
-                        fileUri: uploadedFile.uri,
-                        mimeType: uploadedFile.mimeType || mimeType,
+                        fileUri: validFile.uri,
+                        mimeType: mimeType,
                       },
                     },
                     retryPrompt,
@@ -366,6 +409,7 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
                           endTime: { type: Type.STRING },
                           originalText: { type: Type.STRING },
                           translatedText: { type: Type.STRING },
+                          source: { type: Type.STRING },
                         },
                         required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
                       },
@@ -388,6 +432,7 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
                           endTime: Math.max(0, Number(validEnd.toFixed(3))),
                           originalText: String(item.originalText || '').trim(),
                           translatedText: String(item.translatedText || item.text || '').trim(),
+                          source: item.source === 'on_screen_text' ? ('on_screen_text' as const) : ('speech' as const),
                         };
                       })
                       .filter((item: SubtitleItem) => item.translatedText.length > 0);
@@ -402,57 +447,98 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
             }
           }
 
-          // Post-processing fallback: If target is Thai but translatedText is missing Thai characters, translate directly
-          if (targetLanguage === 'th') {
-            const needsThaiTranslation = subtitles.some(
-              (item) => item.translatedText.length > 0 && !hasThaiChars(item.translatedText)
-            );
+          // Post-processing Language Guard: Detect any foreign language leakage in translatedText
+          const leakedItems = subtitles.filter(
+            (item) => item.translatedText.length > 0 && hasLanguageLeakage(item.translatedText, targetLanguage)
+          );
 
-            if (needsThaiTranslation) {
-              console.log('[Language Guard] Detected non-Thai translatedText in response. Performing automatic Thai translation pass...');
-              try {
-                const transPrompt = `Translate the 'translatedText' of every item in this JSON array into natural, clear Thai (ภาษาไทย). Keep id, startTime, endTime, and originalText unchanged. Output valid JSON array.
+          if (leakedItems.length > 0) {
+            console.log(`[Language Guard] Detected ${leakedItems.length} items with foreign language leakage. Running targeted repair pass...`);
+            onProgress?.({
+              type: 'progress',
+              step: 'generating',
+              message: `ตรวจพบข้อความภาษาอื่นหลุดมา ${leakedItems.length} จุด กำลังแปลแก้ไขให้เป็นภาษา${langConfig.local}บริสุทธิ์...`,
+            });
+
+            try {
+              const transPrompt = `You are a World-Class Subtitle Language Specialist.
+The following subtitle items have foreign language leakage (untranslated Japanese kana/kanji, English words, Chinese characters, or non-${langConfig.name} text) in their 'translatedText'.
+Fix and translate every single item's 'translatedText' into 100% PURE, NATURAL ${langConfig.name} (${langConfig.local}).
+
+CRITICAL REPAIR RULES:
+1. Every character in 'translatedText' MUST be in ${langConfig.name} (${langConfig.local}).
+2. Transliterate all character names, places, and titles phonetically into ${langConfig.name} script (e.g. เรมิเอล, เซนไป).
+3. Translate all moans, cries, sighs, gasps, and emotional interjections into natural ${langConfig.name} words (e.g. อ่า..., อือ..., เฮือก, ไม่นะ).
+4. ABSOLUTELY NO Japanese characters (Kanji, Hiragana, Katakana), Chinese characters, Korean hangul, or English words in 'translatedText'.
+5. Keep id, startTime, endTime, and originalText unchanged. Output valid JSON array.
 
 Input JSON:
-${JSON.stringify(subtitles, null, 2)}`;
+${JSON.stringify(
+  leakedItems.map((item) => ({
+    id: item.id,
+    startTime: item.startTime,
+    endTime: item.endTime,
+    originalText: item.originalText,
+    translatedText: item.translatedText,
+  })),
+  null,
+  2
+)}`;
 
-                const fixed = await requestJSON<SubtitleItem[]>({
-                  prompt: transPrompt,
-                  schema: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        id: { type: Type.STRING },
-                        startTime: { type: Type.NUMBER },
-                        endTime: { type: Type.NUMBER },
-                        originalText: { type: Type.STRING },
-                        translatedText: { type: Type.STRING },
-                      },
-                      required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
+              const fixed = await requestJSON<SubtitleItem[]>({
+                prompt: transPrompt,
+                schema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      id: { type: Type.STRING },
+                      startTime: { type: Type.NUMBER },
+                      endTime: { type: Type.NUMBER },
+                      originalText: { type: Type.STRING },
+                      translatedText: { type: Type.STRING },
                     },
+                    required: ['id', 'startTime', 'endTime', 'originalText', 'translatedText'],
                   },
-                  signal,
-                });
+                },
+                signal,
+              });
 
-                if (Array.isArray(fixed) && fixed.length > 0) {
-                  subtitles = audioDuration > 0
-                    ? clampSubtitlesToDuration(fixed, audioDuration)
-                    : sanitizeAndFixOverlaps(fixed);
-                }
-              } catch (transErr) {
-                console.warn('[Language Guard] Fallback translation warning:', transErr);
+              if (Array.isArray(fixed) && fixed.length > 0) {
+                const fixedMap = new Map(fixed.map((item) => [item.id, item.translatedText]));
+                subtitles = subtitles.map((item) => {
+                  if (fixedMap.has(item.id)) {
+                    return {
+                      ...item,
+                      translatedText: fixedMap.get(item.id) || item.translatedText,
+                    };
+                  }
+                  return item;
+                });
               }
+            } catch (transErr) {
+              console.warn('[Language Guard] Fallback translation warning:', transErr);
             }
           }
+
+          // Safety net sanitization: Clean stray foreign brackets/stray CJK characters if any remain
+          subtitles = subtitles.map((item) => ({
+            ...item,
+            translatedText: sanitizeForeignNoise(item.translatedText, targetLanguage),
+          }));
 
           // Optional karaoke pass: per-word timings, reusing the SAME uploaded
           // file (no re-upload, no second processing wait). Never fails the
           // request — falls back to proportional distribution internally.
           if (wordTiming && subtitles.length > 0) {
+            onProgress?.({
+              type: 'progress',
+              step: 'timing',
+              message: 'กำลังคำนวณการจัดจังหวะคำ (Karaoke Timing)...',
+            });
             subtitles = await attachWordTimings(
               ai,
-              { name: uploadedFile.name, uri: uploadedFile.uri },
+              validFile,
               mimeType,
               subtitles,
               signal
@@ -464,6 +550,7 @@ ${JSON.stringify(subtitles, null, 2)}`;
             ai.files.delete({ name: uploadedFile.name }).catch((err) => {
               console.warn('Failed to delete remote file from Gemini API:', err);
             });
+            uploadedFile = null;
           }
 
           return subtitles;
@@ -472,19 +559,27 @@ ${JSON.stringify(subtitles, null, 2)}`;
           console.warn(`Attempt failed with model ${modelName} using key ...${apiKey.slice(-6)}:`, error.message);
           lastError = err;
 
-          if (uploadedFile && uploadedFile.name) {
-            ai.files.delete({ name: uploadedFile.name }).catch(() => {});
-          }
-
-          // Client disconnected: stop immediately. Without this, every
-          // remaining key×model retries with a FULL media re-upload.
+          // Client disconnected: stop immediately.
           if (signal?.aborted) throw err;
 
-          // Continue to the next key/model on every failure (retryable or not)
-          // so a permanent error on one model cannot kill the whole pipeline.
+          const nextModel = MODELS[mIdx + 1];
+          if (nextModel) {
+            onProgress?.({
+              type: 'progress',
+              step: 'fallback',
+              fromModel: modelName,
+              toModel: nextModel,
+              message: `โมเดล ${modelName} ไม่พร้อม (${error.status || 'Busy'}) สลับไปใช้ ${nextModel} ทันทีโดยไม่ต้องอัปโหลดใหม่...`,
+            });
+          }
         }
       }
+    } finally {
+      if (uploadedFile && uploadedFile.name) {
+        ai.files.delete({ name: uploadedFile.name }).catch(() => {});
+      }
     }
+  }
   } finally {
     // Clean up temporary disk file
     if (fs.existsSync(tempFilePath)) {
