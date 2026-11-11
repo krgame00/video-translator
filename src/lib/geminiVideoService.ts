@@ -158,7 +158,7 @@ export async function processVideoSubtitlesFromStream(
   includeOnScreenText: boolean = false,
   onProgress?: (event: TranslationProgressEvent) => void,
   frames?: VideoFrameInput[]
-): Promise<SubtitleItem[]> {
+): Promise<{ subtitles: SubtitleItem[]; truncated: boolean }> {
   const apiKeys = env.apiKeys;
   if (apiKeys.length === 0) {
     throw new Error('GEMINI_API_KEY environment variable is missing or empty.');
@@ -196,6 +196,10 @@ export async function processVideoSubtitlesFromStream(
   const audioDuration = wavDurationSeconds(tempFilePath);
 
   let lastError: unknown = null;
+  // Set when the ACCEPTED model response hit maxOutputTokens: cues at the end
+  // of the clip were silently dropped by the JSON repair. Routes relay this so
+  // the client can point the user at gap repair.
+  let outputTruncated = false;
 
   try {
     for (const apiKey of apiKeys) {
@@ -382,6 +386,7 @@ C. Timestamps must follow the ACTUAL speech or visual rhythm you observe — not
           // of the clip are silently lost once JSON repair salvages the array.
           const finishReason = String(response.candidates?.[0]?.finishReason ?? '');
           if (finishReason === 'MAX_TOKENS') {
+            outputTruncated = true;
             console.warn('[Truncation Guard] Gemini output hit maxOutputTokens; cues at the end of the clip may be missing.');
             onProgress?.({
               type: 'progress',
@@ -488,6 +493,9 @@ TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output
                 });
 
                 const retryText = retryRes.text;
+                if (String(retryRes.candidates?.[0]?.finishReason ?? '') === 'MAX_TOKENS') {
+                  outputTruncated = true;
+                }
                 if (retryText) {
                   const retryRaw = parsePartialOrTruncatedJSON(retryText) as GeminiRawSubtitleItem[] | null;
                   if (Array.isArray(retryRaw) && retryRaw.length > 0) {
@@ -623,7 +631,7 @@ ${JSON.stringify(
             uploadedFile = null;
           }
 
-          return subtitles;
+          return { subtitles, truncated: outputTruncated };
         } catch (err: unknown) {
           const error = err as { status?: number; message?: string };
           console.warn(`Attempt failed with model ${modelName} using key ...${apiKey.slice(-6)}:`, error.message);

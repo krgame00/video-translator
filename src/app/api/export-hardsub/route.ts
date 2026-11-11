@@ -17,6 +17,7 @@ import {
   generateJobId,
 } from '@/lib/security';
 import { pumpToWriteStream } from '@/lib/streamPump';
+import { listSubtitleFonts } from '@/lib/fontRegistry';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
@@ -286,6 +287,12 @@ export async function POST(req: NextRequest) {
       };
       const subtitles: SubtitleItem[] = body.subtitles || [];
       const style = sanitizeStyle(body.style);
+      // The burn ships public/fonts to libass via fontsdir — a family that is
+      // not in the registry would silently substitute at render time. Pin it.
+      const availableFamilies = listSubtitleFonts().map((f) => f.family);
+      if (!availableFamilies.includes(style.fontName ?? '')) {
+        style.fontName = availableFamilies[0] ?? 'Itim';
+      }
       const burn = sanitizePrepareOptions(body);
 
       if (!subtitles || subtitles.length === 0) {

@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const subtitles = await processVideoSubtitlesFromStream(
+    const { subtitles, truncated } = await processVideoSubtitlesFromStream(
       file.stream() as unknown as ReadableStream<Uint8Array>,
       file.type || 'audio/wav',
       file.name || `chunk_${chunkIndex}.wav`,
@@ -77,6 +77,7 @@ export async function POST(req: NextRequest) {
       chunkIndex,
       chunkStartTime,
       subtitles,
+      truncated,
     });
   } catch (error: unknown) {
     console.error('Error processing audio chunk:', error);

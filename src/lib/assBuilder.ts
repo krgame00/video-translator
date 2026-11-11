@@ -149,6 +149,9 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
   const playResX = Math.max(16, Math.round(opts.playResX));
   const playResY = Math.max(16, Math.round(opts.playResY));
   const style = opts.style;
+  // The burn ships public/fonts via fontsdir, so any registry family works;
+  // Itim stays the historical default.
+  const fontName = style.fontName && style.fontName.trim() ? style.fontName.trim() : 'Itim';
 
   const fontScale = playResY / ASS_BASE_PLAY_RES_Y;
   const fontsize = Math.max(8, Math.round((style.fontSize || 22) * fontScale));
@@ -167,7 +170,7 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
   // to the highlight color. Kept as a SEPARATE style so plain cues in a mixed
   // file keep the exact text color.
   const karaokePrimary = rgbToAssColor(opts.highlightColor || style.primaryColor || 'FFFFFF');
-  const karaokeStyleLine = `Style: Karaoke,Itim,${fontsize},${karaokePrimary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},2,0,${alignment},${marginLR},${marginLR},${marginV},1`;
+  const karaokeStyleLine = `Style: Karaoke,${fontName},${fontsize},${karaokePrimary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},2,0,${alignment},${marginLR},${marginLR},${marginV},1`;
 
   // Line-budget: spacing characters per wrapped line, from the real frame
   // width minus scaled side margins (Thai glyph ≈ 0.58 × Fontsize wide).
@@ -188,7 +191,7 @@ export function buildAss(subtitles: SubtitleItem[], opts: AssBuildOptions): stri
   const styles = [
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,Itim,${fontsize},${primary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},2,0,${alignment},${marginLR},${marginLR},${marginV},1`,
+    `Style: Default,${fontName},${fontsize},${primary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},2,0,${alignment},${marginLR},${marginLR},${marginV},1`,
     karaokeStyleLine,
   ].join('\r\n');
 

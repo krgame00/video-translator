@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 
       (async () => {
         try {
-          const subtitles = await processVideoSubtitlesFromStream(
+          const { subtitles, truncated } = await processVideoSubtitlesFromStream(
             file.stream() as unknown as ReadableStream<Uint8Array>,
             file.type || 'video/mp4',
             file.name,
@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
             includeOnScreenText,
             emit
           );
-          await emit({ type: 'complete', subtitles });
+          await emit({ type: 'complete', subtitles, truncated });
         } catch (err: unknown) {
           const errMessage = err instanceof Error ? err.message : String(err);
           await emit({ type: 'error', message: errMessage || 'An unexpected error occurred during processing.' });
@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Stream file contents directly to disk to consume near-zero Node memory
-    const subtitles = await processVideoSubtitlesFromStream(
+    const { subtitles, truncated } = await processVideoSubtitlesFromStream(
       file.stream() as unknown as ReadableStream<Uint8Array>,
       file.type || 'video/mp4',
       file.name,
@@ -99,6 +99,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       subtitles,
+      truncated,
     });
   } catch (error: unknown) {
     console.error('Error processing video subtitles:', error);

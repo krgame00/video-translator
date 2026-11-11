@@ -10,6 +10,7 @@ import { searchSubtitles, findAndReplaceSubtitles, findActiveSubtitle, splitSubt
 import { extractAudioSegment } from '@/lib/audioExtractor';
 import { extractVideoFrames, type ExtractedFrame } from '@/lib/videoFrameExtractor';
 import { hasLanguageLeakage } from '@/lib/languageCheck';
+import { isAbortError } from '@/lib/translationPipeline';
 
 interface SubtitleEditorProps {
   subtitles: SubtitleItem[];
@@ -48,6 +49,11 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   const [filterLeakedOnly, setFilterLeakedOnly] = useState<boolean>(false);
   const [isFillingGap, setIsFillingGap] = useState<boolean>(false);
   const [gapStatus, setGapStatus] = useState<string>('');
+  const [retranslatingId, setRetranslatingId] = useState<string | null>(null);
+  // Gap repair runs requests that can take minutes; leaving the editor must
+  // abort them instead of leaving orphaned requests with no receiver.
+  const gapAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => gapAbortRef.current?.abort(), []);
 
   const formatClock = useCallback((secs: number) => {
     const m = Math.floor(secs / 60);
@@ -221,6 +227,8 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       }
       if (isFillingGap || gapsToFill.length === 0) return;
 
+      const controller = new AbortController();
+      gapAbortRef.current = controller;
       setIsFillingGap(true);
       const isMulti = gapsToFill.length > 1;
       setGapStatus(
@@ -254,7 +262,10 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
               const audioBlob = await extractAudioSegment(selectedFile, padStart, padDuration);
 
               let framesData: ExtractedFrame[] = [];
-              if (videoUrl && (includeOnScreenText || isVideo)) {
+              // The OCR toggle is honest everywhere: repairs scan visuals only
+              // when the user opted into on-screen text, and the gap-repair
+              // buttons describe the behavior accordingly.
+              if (videoUrl && includeOnScreenText && isVideo) {
                 try {
                   framesData = await extractVideoFrames(videoUrl, padStart, padEnd, {
                     maxFrames: Math.min(24, Math.max(3, Math.ceil(padDuration / 3))),
@@ -272,7 +283,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
               formData.append('chunkStartTime', String(padStart));
               formData.append('targetLanguage', targetLanguage);
               formData.append('wordTiming', '0');
-              formData.append('includeOnScreenText', framesData.length > 0 || includeOnScreenText ? '1' : '0');
+              formData.append('includeOnScreenText', framesData.length > 0 ? '1' : '0');
               if (framesData.length > 0) {
                 formData.append('frames', JSON.stringify(framesData));
               }
@@ -280,6 +291,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
               const res = await fetch('/api/video-translate-chunk', {
                 method: 'POST',
                 body: formData,
+                signal: controller.signal,
               });
 
               const data = await res.json();
@@ -305,26 +317,34 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
           }
         }
 
+        // Partial results from an aborted run are still paid-for work: apply
+        // them, but skip the toasts (the editor may already be unmounted).
         if (allRecoveredCues.length === 0) {
-          notify?.('Gemini ไม่พบเสียงพูดหรือข้อความเพิ่มเติมในช่วงที่ขาด', 'info');
+          if (!controller.signal.aborted) {
+            notify?.('Gemini ไม่พบเสียงพูดหรือข้อความเพิ่มเติมในช่วงที่ขาด', 'info');
+          }
           return;
         }
 
         const ocrCount = allRecoveredCues.filter((c) => c.source === 'on_screen_text').length;
         const merged = sanitizeAndFixOverlaps([...subtitlesRef.current, ...allRecoveredCues]);
         onSubtitlesChange(merged);
-        notify?.(
-          `ซ่อมแซมช่วงที่ขาด${isMulti ? `ทั้งหมด (${successGapsCount}/${gapsToFill.length} จุด)` : ''} สำเร็จ (+${allRecoveredCues.length} รายการ${
-            ocrCount > 0 ? ` รวมข้อความบนจอ ${ocrCount}` : ''
-          })`,
-          'success'
-        );
+        if (!controller.signal.aborted) {
+          notify?.(
+            `ซ่อมแซมช่วงที่ขาด${isMulti ? `ทั้งหมด (${successGapsCount}/${gapsToFill.length} จุด)` : ''} สำเร็จ (+${allRecoveredCues.length} รายการ${
+              ocrCount > 0 ? ` รวมข้อความบนจอ ${ocrCount}` : ''
+            })`,
+            'success'
+          );
+        }
       } catch (err: unknown) {
+        if (isAbortError(err)) return;
         const msg = err instanceof Error ? err.message : String(err);
         notify?.(`เกิดข้อผิดพลาดในการซ่อมช่วงที่ขาด: ${msg}`, 'error');
       } finally {
         setIsFillingGap(false);
         setGapStatus('');
+        if (gapAbortRef.current === controller) gapAbortRef.current = null;
       }
     },
     [
@@ -400,6 +420,48 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
       'info'
     );
   }, [onSubtitlesChange, notify]);
+
+  // Re-translates ONE cue with its ±2 neighbors as context (so pronouns and
+  // naming stay consistent), reusing the existing SRT translation endpoint.
+  // Only the focus cue's new text is applied; neighbor results are discarded.
+  const handleRetranslateCue = useCallback(async (id: string) => {
+    if (retranslatingId) return;
+    const current = subtitlesRef.current;
+    const idx = current.findIndex((item) => item.id === id);
+    if (idx === -1) return;
+
+    setRetranslatingId(id);
+    try {
+      const context = current
+        .slice(Math.max(0, idx - 2), idx + 3)
+        .map((c) => ({ ...c, translatedText: '' }));
+      const res = await fetch('/api/translate-srt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subtitles: context, targetLanguage }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Retranslate failed.');
+      }
+      const fixed = (data.subtitles || []).find((s: SubtitleItem) => s.id === id);
+      if (!fixed || !fixed.translatedText) {
+        notify?.('AI ไม่ส่งผลแปลของคิวนี้กลับมา ลองอีกครั้ง', 'error');
+        return;
+      }
+      onSubtitlesChange(
+        current.map((item) =>
+          item.id === id ? { ...item, translatedText: fixed.translatedText, words: undefined } : item
+        )
+      );
+      notify?.('แปลคิวนี้ใหม่ด้วยบริบทข้างเคียงแล้ว', 'success');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      notify?.(`แปลใหม่ไม่สำเร็จ: ${msg}`, 'error');
+    } finally {
+      setRetranslatingId(null);
+    }
+  }, [retranslatingId, targetLanguage, onSubtitlesChange, notify]);
 
   const handleAddSubtitle = useCallback(() => {
     const current = subtitlesRef.current;
@@ -649,7 +711,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
               disabled={isFillingGap}
               onClick={() => handleFillSpecificGap(activeGap)}
               className="px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-cyan-500/40 text-cyan-200 font-medium text-xs flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer disabled:opacity-50"
-              title="ตรวจพบช่วงว่างในคลิป คลิกเพื่อดึงเสียงและสแกนข้อความบนจอภาพ (OCR) มาแปลเติม"
+              title={includeOnScreenText
+                ? 'ตรวจพบช่วงว่างในคลิป คลิกเพื่อดึงเสียงและสแกนข้อความบนจอภาพ (OCR) มาแปลเติม'
+                : 'ตรวจพบช่วงว่างในคลิป คลิกเพื่อดึงเสียงช่วงนี้มาแปลเติม (เปิดสวิตช์ OCR เพื่อสแกนข้อความบนจอด้วย)'}
             >
               {isFillingGap ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
               <span>แปลเฉพาะช่วงนี้</span>
@@ -782,6 +846,8 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
                   onJumpTo={onJumpTo}
                   onSplit={handleSplit}
                   onMerge={handleMerge}
+                  onRetranslate={handleRetranslateCue}
+                  retranslating={retranslatingId === item.id}
                   targetLanguage={targetLanguage}
                 />
               </div>

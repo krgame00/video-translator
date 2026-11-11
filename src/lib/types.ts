@@ -59,6 +59,8 @@ export type TranslationProgressEvent =
   | {
       type: 'complete';
       subtitles: SubtitleItem[];
+      /** True when the accepted response hit maxOutputTokens (tail cues lost). */
+      truncated?: boolean;
     }
   | {
       type: 'error';

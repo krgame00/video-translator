@@ -1,5 +1,6 @@
 export interface SubtitleStyleSettings {
   position: 'top' | 'middle' | 'bottom'; // default 'bottom'
+  fontName: string;                      // family from public/fonts (burn + preview)
   fontSize: number;                      // 18 | 22 | 26 (libass units)
   primaryColor: string;                  // 6-hex, no '#' — base text color
   highlightColor: string;                // 6-hex — karaoke sung-word color
@@ -9,6 +10,7 @@ export interface SubtitleStyleSettings {
 
 export const DEFAULT_SUBTITLE_STYLE: SubtitleStyleSettings = {
   position: 'bottom',
+  fontName: 'Itim',
   fontSize: 22,
   primaryColor: 'FFFFFF',
   highlightColor: 'FFFF00',
@@ -44,6 +46,10 @@ export function loadSubtitleStyle(): SubtitleStyleSettings {
     if (!parsed || typeof parsed !== 'object') return fallback;
 
     const result: SubtitleStyleSettings = { ...fallback };
+
+    if (typeof parsed.fontName === 'string' && /^[A-Za-z0-9 _-]{1,64}$/.test(parsed.fontName)) {
+      result.fontName = parsed.fontName;
+    }
 
     if (parsed.position === 'top' || parsed.position === 'middle' || parsed.position === 'bottom') {
       result.position = parsed.position;

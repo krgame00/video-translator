@@ -29,6 +29,8 @@ interface ExportModalProps {
   style: SubtitleStyleSettings;
   onStyleChange: (s: SubtitleStyleSettings) => void;
   notify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  /** Families from the server font registry (public/fonts). */
+  fonts?: string[];
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -43,6 +45,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   style,
   onStyleChange,
   notify,
+  fonts = ['Itim'],
 }) => {
   const [isFFmpegExporting, setIsFFmpegExporting] = useState(false);
   const [ffmpegStatus, setFfmpegStatus] = useState('');
@@ -201,7 +204,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             borderStyle: style.borderStyle,
             marginV: style.marginV,
             position: style.position,
-            fontName: 'Itim'
+            fontName: style.fontName || 'Itim'
           }
         }),
       });
@@ -428,6 +431,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </p>
 
             <div className="grid grid-cols-3 gap-2 text-xs">
+              {/* Font Selector (registry families; ships with the burn) */}
+              <div className="col-span-3">
+                <label className="text-[10px] text-zinc-400 block mb-1">Font</label>
+                <select
+                  value={style.fontName || 'Itim'}
+                  onChange={(e) => onStyleChange({ ...style, fontName: e.target.value })}
+                  style={{ colorScheme: 'dark' }}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100 focus:outline-none text-xs"
+                >
+                  {fonts.map((f) => (
+                    <option key={f} value={f}>{f}</option>
+                  ))}
+                </select>
+              </div>
+
               {/* Size Selector */}
               <div>
                 <label className="text-[10px] text-zinc-400 block mb-1">Font Size</label>

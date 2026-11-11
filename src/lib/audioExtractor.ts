@@ -28,27 +28,52 @@ const PEAK_POINTS = 600;
  * inside the 1M-token limit for ordinary content.
  */
 const TARGET_SAMPLE_RATE = 8000;
-export async function extractAudioFromVideo(file: File): Promise<Blob> {
-  if (file.size > 500 * 1024 * 1024) {
-    console.warn(`[Audio Extractor] Large file detected (${(file.size / 1024 / 1024).toFixed(0)}MB > 500MB). Client extraction may require significant RAM.`);
+
+/** Resolves the OfflineAudioContext constructor across browser variants. */
+function getOfflineAudioContextCtor(): typeof OfflineAudioContext {
+  if (typeof window !== 'undefined') {
+    const ctor = window.OfflineAudioContext ||
+      (window as typeof window & { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
+    if (ctor) return ctor;
   }
+  const ctor = (globalThis as typeof globalThis & { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
+  if (!ctor) throw new Error('OfflineAudioContext unavailable in this environment');
+  return ctor;
+}
 
-  const arrayBuffer = await file.arrayBuffer();
-  const dummyCtx = new OfflineAudioContext(1, 16000, 16000);
-  const audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
+/**
+ * Decoded-AudioBuffer cache for targeted slicing (gap repair / auto-heal).
+ * Decoding a large video's whole audio track costs seconds to minutes, and
+ * every gap repair used to repeat it for the same file. Keyed by File
+ * reference in a WeakMap, so picking a new file lets the GC release the old
+ * buffer. Buffers longer than 2h (≈460MB as 16kHz mono Float32) skip the
+ * cache to bound memory on very long media.
+ */
+const decodedAudioCache = new WeakMap<File, Promise<AudioBuffer>>();
+const DECODE_CACHE_MAX_DURATION_SECS = 2 * 60 * 60;
 
-  const targetSampleRate = TARGET_SAMPLE_RATE;
-    const duration = audioBuffer.duration;
-    const targetLength = Math.ceil(duration * targetSampleRate);
+async function decodeFileAudio(file: File): Promise<AudioBuffer> {
+  const cached = decodedAudioCache.get(file);
+  if (cached) return cached;
 
-    const offlineCtx = new OfflineAudioContext(1, targetLength, targetSampleRate);
-  const source = offlineCtx.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(offlineCtx.destination);
-  source.start(0);
-
-  const renderedBuffer = await offlineCtx.startRendering();
-  return encodeWAV(renderedBuffer.getChannelData(0), targetSampleRate);
+  const promise = (async () => {
+    const arrayBuffer = await file.arrayBuffer();
+    const dummyCtx = new (getOfflineAudioContextCtor())(1, 16000, 16000);
+    const audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
+    // decodeAudioData copies — the raw file copy is released once this scope
+    // ends; only the decoded AudioBuffer can stay pinned by the cache.
+    if (audioBuffer.duration <= DECODE_CACHE_MAX_DURATION_SECS) {
+      decodedAudioCache.set(file, Promise.resolve(audioBuffer));
+    } else {
+      decodedAudioCache.delete(file);
+    }
+    return audioBuffer;
+  })();
+  // In-flight dedupe: a concurrent call must not start a second decode.
+  // A failed decode drops the entry so a retry can re-attempt.
+  decodedAudioCache.set(file, promise);
+  promise.catch(() => decodedAudioCache.delete(file));
+  return promise;
 }
 
 /**
@@ -60,16 +85,7 @@ export async function extractAudioSegment(
   startTime: number,
   durationSecs: number
 ): Promise<Blob> {
-  const arrayBuffer = await file.arrayBuffer();
-  const AudioCtx =
-    (typeof window !== 'undefined' &&
-      (window.OfflineAudioContext ||
-        (window as typeof window & { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext)) ||
-    (globalThis as typeof globalThis & { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
-
-  if (!AudioCtx) throw new Error('OfflineAudioContext unavailable in this environment');
-  const dummyCtx = new AudioCtx(1, 16000, 16000);
-  const audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
+  const audioBuffer = await decodeFileAudio(file);
 
   const targetSampleRate = TARGET_SAMPLE_RATE;
   const duration = audioBuffer.duration;
@@ -77,7 +93,7 @@ export async function extractAudioSegment(
   const clampedDuration = Math.max(0.5, Math.min(duration - clampedStart, durationSecs));
   const targetLength = Math.ceil(clampedDuration * targetSampleRate);
 
-  const offlineCtx = new AudioCtx(1, targetLength, targetSampleRate);
+  const offlineCtx = new (getOfflineAudioContextCtor())(1, targetLength, targetSampleRate);
   const source = offlineCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(offlineCtx.destination);
@@ -96,12 +112,9 @@ export async function extractAudioChunks(
   let audioBuffer: AudioBuffer;
 
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const webkitOfflineCtx = (window as typeof window & { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
-    const dummyCtx = new (window.OfflineAudioContext || webkitOfflineCtx)(1, 16000, 16000);
-    audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
-    // decodeAudioData copies — the raw file copy can be released immediately
-    // instead of pinning up to ~1GB for the whole extraction.
+    // Shared decode cache: after this run, gap repairs / auto-heal reuse the
+    // decoded buffer instead of re-decoding the whole file per call.
+    audioBuffer = await decodeFileAudio(file);
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     if (errMsg.includes('allocation') || errMsg.includes('buffer') || err instanceof RangeError) {

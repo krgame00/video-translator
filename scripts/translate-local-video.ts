@@ -106,12 +106,12 @@ async function runLocalVideoTranslation(videoPath: string, targetLanguage: strin
             },
           });
 
-          chunkSubtitles = await processVideoSubtitlesFromStream(
+          ({ subtitles: chunkSubtitles } = await processVideoSubtitlesFromStream(
             stream,
             'audio/mp3',
             chunkFile,
             targetLanguage
-          );
+          ));
 
           success = true;
           break;

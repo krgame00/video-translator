@@ -40,7 +40,7 @@ async function refineChunk6() {
         },
       });
 
-      const chunkSubtitles = await processVideoSubtitlesFromStream(
+      const { subtitles: chunkSubtitles } = await processVideoSubtitlesFromStream(
         stream,
         'audio/mp3',
         'chunk_005.mp3',

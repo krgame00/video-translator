@@ -2,6 +2,24 @@
 
 ## Current Status & Verification Log
 
+### [2026-11-12] Truncation Flag, OCR-Honest Repairs, and Hardsub Font Selection
+- **Status**: `VERIFIED WORKING` on tests + build (font picker + truncation toast pending UI proof)
+- **What Landed**:
+  1. **Truncation flag end-to-end**: `processVideoSubtitlesFromStream` now returns `{ subtitles, truncated }` — set when the ACCEPTED response's `finishReason` is MAX_TOKENS (main path and the timing-guard retry). The chunk route and `/api/video-translate` relay it (`ChunkResult.truncated`; the NDJSON `complete` event carries it), and the full-run success toast appends how many chunks were truncated with a pointer to gap repair. The two maintenance scripts in `scripts/` were updated to the new return shape (found by tsc, not by me).
+  2. **OCR toggle is honest everywhere**: gap repair (`handleFillGaps`) and auto-heal extract frames only when `includeOnScreenText` is on (previously `|| isVideo` made every video scan visuals); the repair button title adapts (audio-only vs audio+OCR). A parallel writer made OCR default ON, so default behavior is unchanged — turning the toggle off now truly saves the frame cost.
+  3. **Hardsub font selection**: new `src/lib/fontRegistry.ts` scans `public/fonts` (family derived from filename, `-Regular` preferred, Itim sorted first) with a new `GET /api/fonts`; `buildAss` writes `style.fontName` into both Style lines (was hard-coded Itim); the burn route pins unknown families back to the registry; ExportModal and the VideoPlayer style panel get Font selects; the page injects `@font-face` rules from the registry so the preview renders the chosen family; the choice persists in `subStyle` (new `fontName` field with validation). Today `public/fonts` holds only Itim — dropping more `.ttf` files in makes them selectable (the full directory ships to libass via fontsdir already).
+- **Verification Evidence**: `npm run gate` 25 files passed (subtitleStyle round-trip test extended with fontName); `npx next build` green. The two `scripts/` consumers of the service return shape surfaced via typecheck.
+- **Commit status**: not committed (user owns commit timing).
+
+### [2026-11-12] Decode Memoization, Gap-Repair Abort, and Per-Cue AI Re-translate
+- **Status**: `VERIFIED WORKING` on tests + build (per-cue button pending UI proof)
+- **What Landed**:
+  1. **Decoded-buffer cache** (`src/lib/audioExtractor.ts`): `decodeFileAudio` caches the 16kHz decoded AudioBuffer per File in a WeakMap (in-flight promise dedupe; failure clears the entry). Gap repair / auto-heal used to re-decode the whole file per call (auto-heal of 4 gaps on a 1GB file = 4 full decodes); now one decode is shared across the translation run and every repair. Buffers longer than 2h (~460MB as 16kHz mono Float32) skip the cache to bound memory. Dead `extractAudioFromVideo` removed (no callers; grep-verified).
+  2. **Gap-repair abort**: `handleFillGaps` now runs with an AbortController stored in `gapAbortRef`, aborted on editor unmount; partial results recovered before an abort are still merged (paid-for work kept) but toasts are skipped. Integrated with the parallel writer's new multi-gap parallel batching (allSettled, concurrency 3).
+  3. **Per-cue AI re-translate**: new Wand2 button on each `SubtitleItemCard` calls the existing `/api/translate-srt` endpoint with the focus cue ± 2 neighbors as context (ids are echoed back), then applies ONLY the focus cue's new translation and drops stale karaoke words. No server changes. Note: the endpoint's per-IP rate limit is 5 req/min, so rapid clicking can hit 429 (surfaces as a toast).
+- **Verification Evidence**: `npm run gate` 25 files passed (new `src/lib/audioExtractor.test.ts`: one decode per File, per-File keys, >2h buffers skip cache); `npx next build` compiled all routes. The re-translate button has no component test (repo has no DOM harness; lib-only test convention) — prove it on the real UI.
+- **Commit status**: not committed (user owns commit timing per workflow).
+
 ### [2026-11-11] Chunked OCR, Failed-Chunk Retry, Adaptive ETA, and Editor/Export Upgrades
 - **Status**: `VERIFIED WORKING` on tests + build (real-footage OCR run pending user proof)
 - **What Landed**:
@@ -12,7 +30,7 @@
   5. **Reliability**: token-ceiling errors fail fast (1 attempt, no futile retries) via `isNonRetryableChunkError`; `autoAuditAndHealGaps` (added by a parallel writer) now takes `skipWindows` so gaps inside already-failed chunks are left to the retry path instead of being double-translated; auto-restore skips when the user already selected a file.
 - **Note**: a parallel writer added `autoAuditAndHealGaps` to `page.tsx` mid-flight (749 → 1013 lines). This session integrated with it rather than reverting.
 - **Verification Evidence**: `npm run gate` (tsc + eslint + vitest) 24 files / 73 tests passed; `npx next build` compiled all 9 routes; independent poteto-agent review ran the gates itself, and its findings F1-F4, F6, F8 are fixed. Deferred with reasons: truncation response flag (a 150s chunk yields ~6-10k output tokens vs the 65536 ceiling, so rare), repair passes always scan visuals (the repair banner advertises "เสียง + ข้อความ"), decode memoization for repeated gap repairs, abort signal for gap-repair fetches.
-- **Commit status**: not committed (working tree shared with parallel writer and the user's earlier uncommitted work; user chooses commit timing).
+- **Commit status**: committed as `d0a989d` on main (22 files, +2122/-300; one checkpoint containing the user's earlier uncommitted work, the parallel writer's auto-heal, and this session's features).
 
 ### [2026-11-11] Video Persistence & Subtitle Protection on Reload
 - **Status**: `VERIFIED WORKING`

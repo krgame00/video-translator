@@ -19,6 +19,8 @@ interface VideoPlayerProps {
   seekTime: number | null;
   style: SubtitleStyleSettings;
   onStyleChange: (s: SubtitleStyleSettings) => void;
+  /** Families from the server font registry (public/fonts). */
+  fonts?: string[];
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -29,6 +31,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   seekTime,
   style,
   onStyleChange,
+  fonts = ['Itim'],
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -210,6 +213,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 </div>
               </div>
 
+              {/* Font Selector (registry fonts are burnable via public/fonts) */}
+              {fonts.length > 1 && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-zinc-400 shrink-0">Font:</span>
+                  <select
+                    value={style.fontName || 'Itim'}
+                    onChange={(e) => onStyleChange({ ...style, fontName: e.target.value })}
+                    style={{ colorScheme: 'dark' }}
+                    className="flex-1 min-w-0 bg-zinc-950 border border-zinc-800 rounded-lg px-1.5 py-1 text-[10px] text-zinc-100 focus:outline-none max-w-[130px]"
+                  >
+                    {fonts.map((f) => (
+                      <option key={f} value={f}>{f}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {/* Color Selector (shared with hardsub export) */}
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-zinc-400">Color:</span>
@@ -288,8 +308,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               style={overlayPositionStyle}
             >
               <span
-                style={{ fontSize: `${scaledFontSize}px`, ...bgStyle }}
-                className="inline-block px-4 py-2 rounded-xl tracking-wide leading-relaxed font-itim"
+                style={{
+                  fontSize: `${scaledFontSize}px`,
+                  ...bgStyle,
+                  // The chosen registry family first; next/font Itim and the
+                  // generic cursive stack keep the preview readable if the
+                  // web font has not finished loading.
+                  fontFamily: `'${style.fontName || 'Itim'}', var(--font-itim), cursive`,
+                }}
+                className="inline-block px-4 py-2 rounded-xl tracking-wide leading-relaxed"
               >
                 {activeSubtitle.words && activeWordIdx >= 0 ? (
                   activeSubtitle.words.map((w, i) => (

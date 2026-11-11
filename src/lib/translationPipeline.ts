@@ -17,6 +17,8 @@ export const CHUNK_RETRY_BASE_MS = 1500;
 export interface ChunkResult {
   chunkStartTime: number;
   subtitles: SubtitleItem[];
+  /** True when the model's response hit the token ceiling (tail cues lost). */
+  truncated?: boolean;
 }
 
 export interface PipelineCallbacks {
@@ -87,10 +89,10 @@ async function processChunk(
         body: formData,
         signal: deps.signal,
       });
-      const data = (await res.json()) as { success?: boolean; error?: string; subtitles?: SubtitleItem[] };
+      const data = (await res.json()) as { success?: boolean; error?: string; subtitles?: SubtitleItem[]; truncated?: boolean };
       if (!data.success) throw new Error(data.error || `Failed on chunk ${chunk.chunkIndex + 1}`);
       opts.onSuccess?.();
-      return { chunkStartTime: chunk.startTime, subtitles: data.subtitles || [] };
+      return { chunkStartTime: chunk.startTime, subtitles: data.subtitles || [], truncated: Boolean(data.truncated) };
     } catch (err: unknown) {
       if (isAbortError(err)) throw err;
       lastErr = err;

@@ -52,6 +52,26 @@ export default function Home() {
   } | null>(null);
   const [failedChunkCount, setFailedChunkCount] = useState(0);
 
+  // Subtitle font registry from the server (public/fonts) — drives the font
+  // selects and injects @font-face rules so the preview renders the same
+  // family the hardsub burn will use.
+  const [subtitleFonts, setSubtitleFonts] = useState<string[]>(['Itim']);
+  useEffect(() => {
+    fetch('/api/fonts')
+      .then((r) => r.json())
+      .then((data: { files?: { family: string; file: string }[] }) => {
+        if (!Array.isArray(data.files) || data.files.length === 0) return;
+        setSubtitleFonts(data.files.map((f) => f.family));
+        const css = data.files
+          .map((f) => `@font-face { font-family: '${f.family}'; src: url('/fonts/${f.file}') format('truetype'); font-display: swap; }`)
+          .join('\n');
+        const el = document.createElement('style');
+        el.textContent = css;
+        document.head.appendChild(el);
+      })
+      .catch(() => {});
+  }, []);
+
   const subtitlesRef = useRef(subtitles);
   useEffect(() => { subtitlesRef.current = subtitles; }, [subtitles]);
   const videoUrlRef = useRef(videoUrl);
@@ -480,6 +500,13 @@ export default function Home() {
 
         if (!controller.signal.aborted) {
           const merged = mergeChunkSubtitles(chunkResults);
+          // A truncated chunk lost tail cues to the token ceiling — surface it
+          // so the user can fill those spans with gap repair instead of
+          // re-running the whole video.
+          const truncatedCount = chunkResults.filter((r) => r.truncated).length;
+          const truncatedNote = truncatedCount > 0
+            ? ` — ผลของ ${truncatedCount} ท่อนยาวถึงลิมิตโมเดล ซับท้ายท่อนนั้นอาจขาด ใช้ปุ่มซ่อมช่วงที่ขาดเติมได้`
+            : '';
 
           // Auto-Audit & Self-Healing: verify and fill any dropped gaps in the first round!
           const { subtitles: completeSubs, healedCount } = await autoAuditAndHealGaps(
@@ -487,7 +514,7 @@ export default function Home() {
             selectedFile,
             videoDuration || 0,
             controller.signal,
-            ocrMode || isVideo,
+            ocrMode,
             failedChunks.length > 0
               ? chunks
                   .filter((c) => failedChunks.includes(c.chunkIndex))
@@ -514,7 +541,7 @@ export default function Home() {
               dispatch({
                 type: 'SET_TOAST',
                 payload: {
-                  msg: `แปลสำเร็จครบถ้วนรอบแรก (${completeSubs.length} cues, อุดรอยโหว่อัตโนมัติ ${healedCount} จุด)`,
+                  msg: `แปลสำเร็จครบถ้วนรอบแรก (${completeSubs.length} cues, อุดรอยโหว่อัตโนมัติ ${healedCount} จุด)${truncatedNote}`,
                   type: 'success',
                 },
               });
@@ -522,7 +549,7 @@ export default function Home() {
               dispatch({
                 type: 'SET_TOAST',
                 payload: {
-                  msg: `แปลสำเร็จครบถ้วนรอบแรก (${completeSubs.length} cues)`,
+                  msg: `แปลสำเร็จครบถ้วนรอบแรก (${completeSubs.length} cues)${truncatedNote}`,
                   type: 'success',
                 },
               });
@@ -556,7 +583,7 @@ export default function Home() {
             selectedFile,
             videoDuration || 0,
             controller.signal,
-            ocrMode || isVideo
+            ocrMode
           );
 
           if (!controller.signal.aborted) {
@@ -980,7 +1007,7 @@ export default function Home() {
           <div className="flex-1 flex flex-col gap-4 min-h-0">
             <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 min-h-0">
               <div className="lg:col-span-7 xl:col-span-8 lg:h-[520px] min-h-0 min-w-0">
-                <VideoPlayer videoUrl={videoUrl} subtitles={subtitles} currentTime={currentTime} onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })} seekTime={seekTime} style={subStyle} onStyleChange={setSubStyle} />
+                <VideoPlayer videoUrl={videoUrl} subtitles={subtitles} currentTime={currentTime} onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })} seekTime={seekTime} style={subStyle} onStyleChange={setSubStyle} fonts={subtitleFonts} />
               </div>
               {/* Must carry a matching col-span: the grid is 12 columns from
                   lg: up, and a child without one defaults to span 1 — an
@@ -1009,7 +1036,7 @@ export default function Home() {
       </div>
 
       {/* Export Modal */}
-      <ExportModal isOpen={isExportOpen} onClose={() => dispatch({ type: 'SET_EXPORT_OPEN', payload: false })} subtitles={subtitles} videoUrl={videoUrl} selectedFile={selectedFile} duration={videoDuration} playResX={videoWidth || undefined} playResY={videoHeight || undefined} style={subStyle} onStyleChange={setSubStyle} notify={showToast} />
+      <ExportModal isOpen={isExportOpen} onClose={() => dispatch({ type: 'SET_EXPORT_OPEN', payload: false })} subtitles={subtitles} videoUrl={videoUrl} selectedFile={selectedFile} duration={videoDuration} playResX={videoWidth || undefined} playResY={videoHeight || undefined} style={subStyle} onStyleChange={setSubStyle} notify={showToast} fonts={subtitleFonts} />
 
       {/* Keyboard Shortcuts */}
       {isShortcutsModalOpen && (
