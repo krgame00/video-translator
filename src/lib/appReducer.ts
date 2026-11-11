@@ -41,7 +41,7 @@ export interface AppState {
 }
 
 export type AppAction =
-  | { type: 'SET_FILE'; payload: { file: File; url: string; duration: number; isLargeFile: boolean; videoWidth?: number; videoHeight?: number } }
+  | { type: 'SET_FILE'; payload: { file: File; url: string; duration: number; isLargeFile: boolean; videoWidth?: number; videoHeight?: number; keepSubtitles?: boolean } }
   | { type: 'SET_SUBTITLES'; payload: SubtitleItem[] }
   | { type: 'UPDATE_SUBTITLES'; payload: SubtitleItem[] }
   | { type: 'SET_CURRENT_TIME'; payload: number }
@@ -49,7 +49,7 @@ export type AppAction =
   | { type: 'SET_TARGET_LANGUAGE'; payload: string }
   | { type: 'START_TRANSLATION'; payload: { estimatedSecs: number; statusMessage: string; controller: AbortController } }
   | { type: 'UPDATE_PROGRESS'; payload: { elapsedSecs?: number; statusMessage?: string } }
-  | { type: 'TRANSLATION_SUCCESS'; payload: SubtitleItem[] }
+  | { type: 'TRANSLATION_SUCCESS'; payload: SubtitleItem[]; preserveHistory?: boolean }
   | { type: 'TRANSLATION_ERROR'; payload: string }
   | { type: 'TRANSLATION_CANCELLED' }
   | { type: 'SET_EXPORT_OPEN'; payload: boolean }
@@ -108,9 +108,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         isLargeFile: action.payload.isLargeFile,
         videoWidth: action.payload.videoWidth ?? 0,
         videoHeight: action.payload.videoHeight ?? 0,
-        subtitles: [],
-        past: [],
-        future: [],
+        subtitles: action.payload.keepSubtitles ? state.subtitles : [],
+        past: action.payload.keepSubtitles ? state.past : [],
+        future: action.payload.keepSubtitles ? state.future : [],
         error: null,
         elapsedSecs: 0,
         statusMessage: 'AI Processing Video Speech...',
@@ -162,7 +162,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         isLoading: false,
         subtitles: action.payload,
-        past: [],
+        // A retry-merge is an edit on top of the user's work, not a fresh
+        // document: snapshot the pre-merge list so the merge itself is
+        // undoable. Fresh runs reset history to an empty slate.
+        past: action.preserveHistory && state.past[state.past.length - 1] !== state.subtitles
+          ? [...state.past.slice(-(HISTORY_LIMIT - 1)), state.subtitles]
+          : [],
         future: [],
         toast: { msg: `Subtitle ready (${action.payload.length} cues)`, type: 'success' },
       };

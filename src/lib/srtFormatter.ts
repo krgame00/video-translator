@@ -335,7 +335,7 @@ export function parseTimestampToSeconds(input: string | number | undefined | nul
  * sensitive, unlike bag-of-chars, so repetitive-but-different Thai phrases
  * are not falsely dropped).
  */
-function isNearBoundaryDuplicate(prev: SubtitleItem, next: SubtitleItem): boolean {
+export function isNearBoundaryDuplicate(prev: SubtitleItem, next: SubtitleItem): boolean {
   if (Math.abs(prev.startTime - next.startTime) > 1.6) return false;
 
   const normalize = (s: string) =>

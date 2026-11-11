@@ -115,6 +115,96 @@ test('runChunkedTranslation batches within the concurrency limit', async () => {
   expect(maxInFlight).toBeLessThanOrEqual(2);
 });
 
+test('runChunkedTranslation passes chunk-local extras via prepareChunk', async () => {
+  const bodies: FormData[] = [];
+  const fetchImpl = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+    bodies.push(init?.body as FormData);
+    return okResponse();
+  }) as unknown as typeof fetch;
+  const ctrl = new AbortController();
+
+  await runChunkedTranslation([makeChunk(0)], {
+    targetLanguage: 'th',
+    karaokeEnabled: false,
+    deps: { fetchImpl, signal: ctrl.signal },
+    onProgress: () => {},
+    prepareChunk: async (chunk, fd) => {
+      fd.append('frames', JSON.stringify([{ timeSec: chunk.startTime, base64Data: 'AAA' }]));
+      fd.append('includeOnScreenText', '1');
+    },
+  });
+
+  expect(bodies).toHaveLength(1);
+  expect(bodies[0].get('includeOnScreenText')).toBe('1');
+  const frames = JSON.parse(bodies[0].get('frames') as string) as { timeSec: number }[];
+  expect(frames[0].timeSec).toBe(0);
+});
+
+test('runChunkedTranslation omits OCR fields when prepareChunk is absent', async () => {
+  const bodies: FormData[] = [];
+  const fetchImpl = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+    bodies.push(init?.body as FormData);
+    return okResponse();
+  }) as unknown as typeof fetch;
+  const ctrl = new AbortController();
+
+  await runChunkedTranslation([makeChunk(0)], {
+    targetLanguage: 'th',
+    karaokeEnabled: false,
+    deps: { fetchImpl, signal: ctrl.signal },
+    onProgress: () => {},
+  });
+
+  expect(bodies[0].get('includeOnScreenText')).toBeNull();
+  expect(bodies[0].get('frames')).toBeNull();
+});
+
+test('runChunkedTranslation emits onEta after each completion except the last', async () => {
+  const fetchImpl = vi.fn(async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    return okResponse();
+  }) as unknown as typeof fetch;
+  const ctrl = new AbortController();
+  const etas: number[] = [];
+
+  await runChunkedTranslation([makeChunk(0), makeChunk(1)], {
+    targetLanguage: 'th',
+    karaokeEnabled: false,
+    deps: { fetchImpl, signal: ctrl.signal },
+    onProgress: () => {},
+    onEta: ({ remainingSecs }) => etas.push(remainingSecs),
+  });
+
+  expect(etas).toHaveLength(1);
+  expect(etas[0]).toBeGreaterThanOrEqual(0);
+});
+
+test('runChunkedTranslation fails fast on non-retryable errors (token ceiling)', async () => {
+  const attempts: number[] = [];
+  const fetchImpl = vi.fn(async () => {
+    attempts.push(1);
+    return {
+      json: async () => ({
+        success: false,
+        error: 'input token count exceeds the maximum number of tokens',
+      }),
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const ctrl = new AbortController();
+
+  const { results, failedChunkIndexes } = await runChunkedTranslation([makeChunk(0)], {
+    targetLanguage: 'th',
+    karaokeEnabled: false,
+    deps: { fetchImpl, signal: ctrl.signal },
+    onProgress: () => {},
+    retryBaseMs: 1,
+  });
+
+  expect(results).toEqual([]);
+  expect(failedChunkIndexes).toEqual([0]);
+  expect(attempts).toHaveLength(1); // no futile retries on a guaranteed-fail payload
+});
+
 test('runSingleTranslation returns subtitles and throws on API failure', async () => {
   const ctrl = new AbortController();
   const ok = (await runSingleTranslation({

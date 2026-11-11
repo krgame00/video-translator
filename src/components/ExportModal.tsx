@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SubtitleItem } from '@/lib/types';
 import { generateSRT, generateVTT, sanitizeAndFixOverlaps } from '@/lib/srtFormatter';
+import { buildAss } from '@/lib/assBuilder';
 import { uploadFileInChunks } from '@/lib/chunkedUploader';
 import { COLOR_OPTIONS, type SubtitleStyleSettings } from '@/lib/subtitleStyle';
 import { Download, FileText, X, Loader2, Clock, Zap, XCircle, Sparkles } from 'lucide-react';
@@ -128,6 +129,47 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     link.click();
     URL.revokeObjectURL(url);
     notify?.(`Downloaded ${subtitles.length} cues (.vtt)`, 'success');
+  };
+
+  const handleDownloadASS = () => {
+    const content = buildAss(sanitizeAndFixOverlaps(subtitles), {
+      // PlayRes must match the real frame for WYSIWYG; fall back to 1080p
+      // when the browser could not report the video dimensions.
+      playResX: playResX || 1920,
+      playResY: playResY || 1080,
+      style: {
+        fontSize: style.fontSize,
+        primaryColor: style.primaryColor,
+        borderStyle: style.borderStyle,
+        marginV: style.marginV,
+        position: style.position,
+      },
+      karaoke,
+      highlightColor: karaoke ? style.highlightColor : undefined,
+    });
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'subtitles.ass';
+    link.click();
+    URL.revokeObjectURL(url);
+    notify?.(`Downloaded ${subtitles.length} cues (.ass)`, 'success');
+  };
+
+  const handleDownloadTXT = () => {
+    const content = subtitles
+      .map((s) => s.translatedText.trim())
+      .filter((t) => t.length > 0)
+      .join('\n\n');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'subtitles.txt';
+    link.click();
+    URL.revokeObjectURL(url);
+    notify?.(`Downloaded transcript (${subtitles.length} cues, .txt)`, 'success');
   };
 
   // FFmpeg server-side hardsub export: prepare job → upload video → poll
@@ -343,6 +385,41 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <Download className="w-4 h-4 text-zinc-500 group-hover:text-purple-400 transition-colors" />
           </button>
 
+          {/* ASS + TXT Export Options */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              onClick={handleDownloadASS}
+              className="flex items-center justify-between p-3.5 rounded-xl bg-[#09090e] border border-[#232334] hover:border-amber-500/50 hover:bg-[#12121a] transition-all text-left group"
+            >
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-lg bg-amber-500/10 text-amber-400 group-hover:scale-110 transition-transform">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-zinc-200">Advanced SubStation (.ass)</p>
+                  <p className="text-xs text-zinc-500">Styling for video players (Instant download)</p>
+                </div>
+              </div>
+              <Download className="w-4 h-4 text-zinc-500 group-hover:text-amber-400 transition-colors" />
+            </button>
+
+            <button
+              onClick={handleDownloadTXT}
+              className="flex items-center justify-between p-3.5 rounded-xl bg-[#09090e] border border-[#232334] hover:border-zinc-500/50 hover:bg-[#12121a] transition-all text-left group"
+            >
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-lg bg-zinc-500/10 text-zinc-400 group-hover:scale-110 transition-transform">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-zinc-200">Plain Text (.txt)</p>
+                  <p className="text-xs text-zinc-500">ข้อความแปลล้วน สำหรับนำไปใช้ต่อ (Instant download)</p>
+                </div>
+              </div>
+              <Download className="w-4 h-4 text-zinc-500 group-hover:text-zinc-300 transition-colors" />
+            </button>
+          </div>
+
           {/* Dynamic Style Customization Section — SHARED with the player preview */}
           <div className="p-3.5 rounded-xl bg-[#09090e] border border-[#232334] space-y-3">
             <p className="text-xs font-semibold text-zinc-300 flex items-center justify-between">
@@ -357,10 +434,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={style.fontSize}
                   onChange={(e) => onStyleChange({ ...style, fontSize: Number(e.target.value) })}
-                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
+                  style={{ colorScheme: 'dark' }}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100 focus:outline-none text-xs"
                 >
                   {[18, 22, 26].map((sz) => (
-                    <option key={sz} value={sz}>{sz}px</option>
+                    <option key={sz} value={sz} className="bg-zinc-900 text-zinc-100">{sz}px</option>
                   ))}
                 </select>
               </div>
@@ -371,10 +449,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={style.primaryColor}
                   onChange={(e) => onStyleChange({ ...style, primaryColor: e.target.value })}
-                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
+                  style={{ colorScheme: 'dark' }}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100 focus:outline-none text-xs"
                 >
                   {COLOR_OPTIONS.map((col) => (
-                    <option key={col} value={col}>#{col}</option>
+                    <option key={col} value={col} className="bg-zinc-900 text-zinc-100">#{col}</option>
                   ))}
                 </select>
               </div>
@@ -385,10 +464,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={style.borderStyle}
                   onChange={(e) => onStyleChange({ ...style, borderStyle: Number(e.target.value) as 1 | 4 })}
-                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs"
+                  style={{ colorScheme: 'dark' }}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100 focus:outline-none text-xs"
                 >
-                  <option value={4}>Black Box (กล่อง)</option>
-                  <option value={1}>Outline Only (ขอบ)</option>
+                  <option value={4} className="bg-zinc-900 text-zinc-100">Black Box (กล่อง)</option>
+                  <option value={1} className="bg-zinc-900 text-zinc-100">Outline Only (ขอบ)</option>
                 </select>
               </div>
             </div>
@@ -400,11 +480,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 <select
                   value={style.position}
                   onChange={(e) => onStyleChange({ ...style, position: e.target.value as 'top' | 'middle' | 'bottom' })}
-                  className="w-full bg-[#050507] border border-[#232334] rounded-lg px-2 py-1 text-white focus:outline-none text-xs capitalize"
+                  style={{ colorScheme: 'dark' }}
+                  className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-zinc-100 focus:outline-none text-xs capitalize"
                 >
-                  <option value="bottom">Bottom (ล่าง)</option>
-                  <option value="middle">Middle (กลาง)</option>
-                  <option value="top">Top (บน)</option>
+                  <option value="bottom" className="bg-zinc-900 text-zinc-100">Bottom (ล่าง)</option>
+                  <option value="middle" className="bg-zinc-900 text-zinc-100">Middle (กลาง)</option>
+                  <option value="top" className="bg-zinc-900 text-zinc-100">Top (บน)</option>
                 </select>
               </div>
               <div>

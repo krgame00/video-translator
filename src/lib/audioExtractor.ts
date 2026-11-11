@@ -51,6 +51,42 @@ export async function extractAudioFromVideo(file: File): Promise<Blob> {
   return encodeWAV(renderedBuffer.getChannelData(0), targetSampleRate);
 }
 
+/**
+ * Extracts a specific audio slice [startTime, startTime + durationSecs] from a media file.
+ * Used for targeted gap repair without re-reading or re-translating the entire video.
+ */
+export async function extractAudioSegment(
+  file: File,
+  startTime: number,
+  durationSecs: number
+): Promise<Blob> {
+  const arrayBuffer = await file.arrayBuffer();
+  const AudioCtx =
+    (typeof window !== 'undefined' &&
+      (window.OfflineAudioContext ||
+        (window as typeof window & { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext)) ||
+    (globalThis as typeof globalThis & { OfflineAudioContext?: typeof OfflineAudioContext }).OfflineAudioContext;
+
+  if (!AudioCtx) throw new Error('OfflineAudioContext unavailable in this environment');
+  const dummyCtx = new AudioCtx(1, 16000, 16000);
+  const audioBuffer = await dummyCtx.decodeAudioData(arrayBuffer);
+
+  const targetSampleRate = TARGET_SAMPLE_RATE;
+  const duration = audioBuffer.duration;
+  const clampedStart = Math.max(0, Math.min(duration, startTime));
+  const clampedDuration = Math.max(0.5, Math.min(duration - clampedStart, durationSecs));
+  const targetLength = Math.ceil(clampedDuration * targetSampleRate);
+
+  const offlineCtx = new AudioCtx(1, targetLength, targetSampleRate);
+  const source = offlineCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(offlineCtx.destination);
+  source.start(0, clampedStart, clampedDuration);
+  const rendered = await offlineCtx.startRendering();
+
+  return encodeWAV(rendered.getChannelData(0), targetSampleRate);
+}
+
 // Default chunk length: 150s of 16kHz mono WAV ≈ 4.7MB, safely inside
 // Gemini's 1M-token input limit (300s ≈ 9.4MB overflows it).
 export async function extractAudioChunks(

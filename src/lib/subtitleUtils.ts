@@ -149,5 +149,111 @@ export function splitSubtitleItem(
   return updated;
 }
 
-// (mergeSubtitleItem removed — unwired; recover from git history if a merge
-// button is ever added alongside the split button.)
+export interface SubtitleGap {
+  startTime: number;
+  endTime: number;
+  duration: number;
+}
+
+/**
+ * Finds all gaps between subtitles longer than minGapSecs (default 6s).
+ * If totalDuration is provided, also checks gap before first subtitle and after last subtitle.
+ */
+export function findSubtitleGaps(
+  subtitles: SubtitleItem[],
+  minGapSecs: number = 6,
+  totalDuration?: number
+): SubtitleGap[] {
+  if (!subtitles || subtitles.length === 0) {
+    if (totalDuration && totalDuration >= minGapSecs) {
+      return [{ startTime: 0, endTime: totalDuration, duration: Number(totalDuration.toFixed(3)) }];
+    }
+    return [];
+  }
+
+  const sorted = [...subtitles].sort((a, b) => a.startTime - b.startTime);
+  const gaps: SubtitleGap[] = [];
+
+  // Gap before first subtitle
+  if (sorted[0].startTime >= minGapSecs) {
+    gaps.push({
+      startTime: 0,
+      endTime: Number(sorted[0].startTime.toFixed(3)),
+      duration: Number(sorted[0].startTime.toFixed(3)),
+    });
+  }
+
+  // Gaps between consecutive subtitles
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const curEnd = sorted[i].endTime;
+    const nextStart = sorted[i + 1].startTime;
+    const gap = nextStart - curEnd;
+    if (gap >= minGapSecs) {
+      gaps.push({
+        startTime: Number(curEnd.toFixed(3)),
+        endTime: Number(nextStart.toFixed(3)),
+        duration: Number(gap.toFixed(3)),
+      });
+    }
+  }
+
+  // Gap after last subtitle
+  if (totalDuration && totalDuration > sorted[sorted.length - 1].endTime) {
+    const lastEnd = sorted[sorted.length - 1].endTime;
+    if (totalDuration - lastEnd >= minGapSecs) {
+      gaps.push({
+        startTime: Number(lastEnd.toFixed(3)),
+        endTime: Number(totalDuration.toFixed(3)),
+        duration: Number((totalDuration - lastEnd).toFixed(3)),
+      });
+    }
+  }
+
+  return gaps;
+}
+
+/**
+ * Finds the specific gap (if any) containing the given time.
+ */
+export function findGapAtTime(
+  subtitles: SubtitleItem[],
+  time: number,
+  minGapSecs: number = 3,
+  totalDuration?: number
+): SubtitleGap | null {
+  const gaps = findSubtitleGaps(subtitles, minGapSecs, totalDuration);
+  return gaps.find((g) => time >= g.startTime && time <= g.endTime) || null;
+}
+
+function joinCueText(a: string, b: string): string {
+  const left = a.trim();
+  const right = b.trim();
+  if (!left) return right;
+  if (!right) return left;
+  return `${left} ${right}`;
+}
+
+/**
+ * Merges a subtitle item into the NEXT one (combined text; time span from the
+ * first cue's start to the second cue's end). Karaoke word timings are stale
+ * after a merge — drop them. Neighbors are array-order neighbors, matching the
+ * visible list. Returns the list unchanged for the last item or unknown ids.
+ */
+export function mergeSubtitleItem(subtitles: SubtitleItem[], id: string): SubtitleItem[] {
+  const index = subtitles.findIndex((item) => item.id === id);
+  if (index === -1 || index === subtitles.length - 1) return subtitles;
+
+  const cur = subtitles[index];
+  const next = subtitles[index + 1];
+  const merged: SubtitleItem = {
+    ...cur,
+    endTime: next.endTime,
+    originalText: joinCueText(cur.originalText, next.originalText),
+    translatedText: joinCueText(cur.translatedText, next.translatedText),
+    words: undefined,
+  };
+
+  const updated = [...subtitles];
+  updated.splice(index, 2, merged);
+  return updated;
+}

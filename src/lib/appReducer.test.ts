@@ -66,6 +66,21 @@ function testSetFileClearsSubtitlesAndHistory() {
   console.assert(s1.selectedFile === file, 'SET_FILE must store the file');
 }
 
+function testSetFileCanKeepSubtitlesWhenRequested() {
+  const subs = [makeSub('a'), makeSub('b')];
+  const s0 = {
+    ...withSubtitles(subs),
+    past: [[makeSub('x')]],
+    future: [[makeSub('y')]],
+  };
+  const file = new File(['x'], 'video.mp4', { type: 'video/mp4' });
+  const s1 = appReducer(s0, { type: 'SET_FILE', payload: { file, url: 'blob:x', duration: 12.5, isLargeFile: false, keepSubtitles: true } });
+  console.assert(s1.subtitles.length === 2, 'SET_FILE with keepSubtitles must preserve subtitles');
+  console.assert(s1.past.length === 1, 'SET_FILE with keepSubtitles must preserve past');
+  console.assert(s1.videoDuration === 12.5, 'SET_FILE must set duration');
+  console.assert(s1.selectedFile === file, 'SET_FILE must store the file');
+}
+
 function testLateResultsAfterCancelAreDropped() {
   // Cancel nulls the controller, so a late SUCCESS/ERROR arriving afterwards
   // must be ignored via the !isLoading guard (regression for the abort race).
@@ -122,16 +137,49 @@ function testUpdateProgressPartialPayload() {
   console.assert(s2.elapsedSecs === 42 && s2.statusMessage === 'new', 'UPDATE_PROGRESS must apply elapsedSecs only');
 }
 
+function testPreserveHistoryOnRetrySuccess() {
+  const controller = new AbortController();
+  let s = appReducer(initialState, {
+    type: 'START_TRANSLATION',
+    payload: { estimatedSecs: 30, statusMessage: 'working', controller },
+  });
+  s = { ...s, subtitles: [makeSub('a'), makeSub('b')], past: [[makeSub('a')]] };
+
+  const merged = appReducer(s, {
+    type: 'TRANSLATION_SUCCESS',
+    payload: [makeSub('a'), makeSub('b'), makeSub('c')],
+    preserveHistory: true,
+  });
+  console.assert(merged.subtitles.length === 3, 'preserveHistory success must apply the merged list');
+  console.assert(
+    merged.past.length === 2 && merged.past[1].length === 2,
+    'preserveHistory must keep prior history and append the pre-merge snapshot'
+  );
+  console.assert(merged.future.length === 0, 'future must stay empty after the merge');
+  const undone = appReducer(merged, { type: 'UNDO' });
+  console.assert(undone.subtitles.length === 2, 'UNDO after a retry-merge must restore the pre-merge list');
+
+  // Fresh runs still wipe history (no preserveHistory flag)
+  const s2 = appReducer(initialState, {
+    type: 'START_TRANSLATION',
+    payload: { estimatedSecs: 30, statusMessage: 'working', controller },
+  });
+  const fresh = appReducer(s2, { type: 'TRANSLATION_SUCCESS', payload: [makeSub('x')] });
+  console.assert(fresh.past.length === 0 && fresh.future.length === 0, 'success without preserveHistory must wipe history');
+}
+
 function testAppReducer() {
   testUndoRedo();
   testBurstCollapsesIntoOneUndo();
   testHistoryCap();
   testSetFileClearsSubtitlesAndHistory();
+  testSetFileCanKeepSubtitlesWhenRequested();
   testLateResultsAfterCancelAreDropped();
   testSuccessWhileAbortedSignalIsDropped();
   testUpdateSubtitlesReferenceEqualShortCircuit();
   testPushHistoryDuplicateGuard();
   testUpdateProgressPartialPayload();
+  testPreserveHistoryOnRetrySuccess();
   console.log('✅ appReducer unit tests passed successfully!');
 }
 

@@ -6,6 +6,7 @@
    amber (signal accent) do the loud work. No gradients, no glass.
    ============================================================ */
 :root {
+  color-scheme: dark;
   /* core surfaces (near-neutral cool) */
   --bg: oklch(0.09 0.003 250);
   --surface: oklch(0.115 0.006 250);

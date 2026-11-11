@@ -142,6 +142,12 @@ ${JSON.stringify(cueList)}`;
   }
 }
 
+export interface VideoFrameInput {
+  timeSec: number;
+  base64Data: string;
+  mimeType?: string;
+}
+
 export async function processVideoSubtitlesFromStream(
   stream: ReadableStream<Uint8Array>,
   mimeType: string,
@@ -150,7 +156,8 @@ export async function processVideoSubtitlesFromStream(
   signal?: AbortSignal,
   wordTiming: boolean = false,
   includeOnScreenText: boolean = false,
-  onProgress?: (event: TranslationProgressEvent) => void
+  onProgress?: (event: TranslationProgressEvent) => void,
+  frames?: VideoFrameInput[]
 ): Promise<SubtitleItem[]> {
   const apiKeys = env.apiKeys;
   if (apiKeys.length === 0) {
@@ -251,12 +258,18 @@ export async function processVideoSubtitlesFromStream(
           };
           const langConfig = langMap[targetLanguage] || { name: targetLanguage, local: targetLanguage };
 
-          const isVideo = mimeType.startsWith('video/') || includeOnScreenText;
+          const hasVisuals = mimeType.startsWith('video/') || includeOnScreenText || Boolean(frames && frames.length > 0);
           const prompt = `You are a World-Class Professional Video & Audio Subtitle Translator & Synchronizer.
 Your task is to:
 1. Transcribe all SPOKEN SPEECH in the media into 'originalText' (set 'source': 'speech') and TRANSLATE it into ${langConfig.name} (${langConfig.local}) for 'translatedText'.
-${isVideo ? `2. ALSO DETECT AND TRANSLATE ALL VISIBLE ON-SCREEN TEXT (burned-in subtitles, Japanese/English hardsubs, captions, signs, title cards, on-screen text overlays) into 'originalText' (set 'source': 'on_screen_text') and TRANSLATE it into ${langConfig.name} (${langConfig.local}) for 'translatedText'.
-   - For on-screen text, set startTime and endTime to the exact interval the text appears and disappears on screen.` : ''}
+${hasVisuals ? `2. ALSO DETECT AND TRANSLATE ALL VISIBLE ON-SCREEN TEXT (OCR):
+   - Thoroughly inspect all video frames and visuals for visible text: hardcoded subtitles (Japanese/English/Chinese hardsubs), signs, title cards, captions, phone screens, sound effect overlays (SFX), and notices.
+   - For every piece of visible on-screen text that conveys dialogue or information:
+     * Transcribe it into 'originalText'
+     * Translate it into pure ${langConfig.name} (${langConfig.local}) for 'translatedText'
+     * Set 'source': 'on_screen_text'
+     * Set 'startTime' and 'endTime' to the interval the text is displayed (e.g. matching frame timestamps).
+   - ZERO-OMISSION FOR VISIBLE TEXT: Even during silent scenes, background music, or soft murmurs with no distinct voice, if there is visible text or captions in the video/frames, you MUST create subtitle cues for that text. Never leave scenes with visible text empty!` : ''}
 
 CRITICAL ZERO-LEAKAGE LANGUAGE REQUIREMENT (HIGHEST PRIORITY):
 1. 'originalText': Transcribe the EXACT spoken speech or visible on-screen text in its original source language (e.g. Japanese/English/Chinese).
@@ -278,8 +291,14 @@ CRITICAL SUBTITLE CUE QUALITY (MUST FOLLOW):
 5. Break speech at sentence or clause boundaries (pauses / intonation). One complete idea per cue.
 6. Keep each cue to at most 2 visual lines: ~40 characters for Thai, ~10-12 words for languages with spaces.
 7. NEVER split a word across lines or cues. For Thai (no spaces between words), always end a cue at a phrase boundary — never mid-word.
-8. Ignore long silent sections or background music without speech or visible text.
-9. Output strictly formatted according to the requested JSON schema.
+8. FULL TIMELINE COVERAGE — NEVER SKIP QUIET SPEECH OR EMOTIONAL VOCALIZATIONS:
+   - Transcribe and translate ALL audible voices, soft whispers, panting, sighs, intimate/quiet speech, gasps, and vocal reactions throughout the ENTIRE media.
+   - Do NOT skip soft or quiet scenes. Only omit stretches of pure silence or instrumental music with zero human voice or visible text.
+   - Maintain continuous chronological coverage without skipping or dropping scenes in the middle of the media.
+9. ZERO ATTENTION DROPS (CRITICAL FIRST-PASS COMPLETENESS):
+   - Do NOT jump or skip ahead across quiet passages, whispers, soft dialogue, or background action. Maintain a steady, continuous flow of cues.
+   - If there is ANY audible voice, whisper, emotional reaction, or visible on-screen text/hardsubs, YOU MUST output subtitle cues for it.
+10. Output strictly formatted according to the requested JSON schema.
 
 CRITICAL SYNC RULES (HIGHEST PRIORITY):
 A. 'startTime' = the exact instant the FIRST syllable is spoken or text appears on screen. 'endTime' = the exact instant the LAST syllable FINISHES or text disappears. Never start a cue before its speech begins; never let a cue linger after its speech ends.
@@ -299,18 +318,40 @@ C. Timestamps must follow the ACTUAL speech or visual rhythm you observe — not
           });
 
           try {
-            const response = await ai.models.generateContent({
-              model: modelName,
-            contents: [
+            const contents: Array<
+              | { fileData: { fileUri: string; mimeType: string } }
+              | { inlineData: { data: string; mimeType: string } }
+              | { text: string }
+              | string
+            > = [
               {
                 fileData: {
                   fileUri: validFile.uri,
                   mimeType: mimeType,
                 },
               },
-              prompt,
-            ],
-            config: {
+            ];
+
+            if (frames && frames.length > 0) {
+              for (const f of frames) {
+                contents.push({
+                  inlineData: {
+                    data: f.base64Data,
+                    mimeType: f.mimeType || 'image/jpeg',
+                  },
+                });
+                contents.push({
+                  text: `[Visual Frame at ${f.timeSec.toFixed(2)}s]`,
+                });
+              }
+            }
+
+            contents.push(prompt);
+
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents,
+              config: {
               maxOutputTokens: 65536,
               responseMimeType: 'application/json',
               abortSignal: signal,
@@ -335,6 +376,18 @@ C. Timestamps must follow the ACTUAL speech or visual rhythm you observe — not
           const responseText = response.text;
           if (!responseText) {
             throw new Error('Gemini API returned an empty response.');
+          }
+
+          // Output-truncation guard: a MAX_TOKENS cutoff means cues at the end
+          // of the clip are silently lost once JSON repair salvages the array.
+          const finishReason = String(response.candidates?.[0]?.finishReason ?? '');
+          if (finishReason === 'MAX_TOKENS') {
+            console.warn('[Truncation Guard] Gemini output hit maxOutputTokens; cues at the end of the clip may be missing.');
+            onProgress?.({
+              type: 'progress',
+              step: 'generating',
+              message: 'ผลลัพธ์ยาวถึงลิมิตของโมเดล ซับช่วงท้ายอาจขาด ใช้ปุ่มซ่อมช่วงที่ขาดเพื่อเติมได้',
+            });
           }
 
           const rawSubtitles = parsePartialOrTruncatedJSON(responseText) as GeminiRawSubtitleItem[] | null;
@@ -379,22 +432,39 @@ C. Timestamps must follow the ACTUAL speech or visual rhythm you observe — not
                 `[Timing Guard] Model timeline out of range (rawCover=${rawCover.toFixed(1)}s, audio=${audioDuration.toFixed(1)}s). Retrying once...`
               );
               try {
-                const retryPrompt = `Re-transcribe and re-translate the speech in this audio file, but ONLY its true timestamps matter.
+                const retryPrompt = `Re-transcribe and re-translate the speech and any visible on-screen text in this media segment, but ONLY its true timestamps matter.
 REAL AUDIO DURATION IS EXACTLY ${audioDuration.toFixed(3)} SECONDS. Every cue MUST lie strictly inside [0, ${audioDuration.toFixed(3)}]. The first cue starts at 00:00:00.000, the last cue ends no later than ${formatDur(audioDuration)}.
-Assign each cue's start/end to the exact moment the words are actually spoken: startTime = the instant the FIRST syllable is spoken, endTime = the instant the LAST syllable finishes. Do NOT stretch cues, do NOT invent long silent gaps, and do NOT output any timestamp past the real duration. Most cues are 1.5-4 seconds (hard limits 2-7s); if a sentence contains a silent pause longer than 0.8 seconds, split it into two cues AT the pause. Skip regions with no speech.
-TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output valid JSON array with id, startTime, endTime (HH:MM:SS.mmm), originalText, translatedText.`;
+Assign each cue's start/end to the exact moment the words are actually spoken or on-screen text is shown. For on-screen text, set source to 'on_screen_text'. Do NOT stretch cues, do NOT invent long silent gaps, and do NOT output any timestamp past the real duration. Most cues are 1.5-4 seconds (hard limits 2-7s); if a sentence contains a silent pause longer than 0.8 seconds, split it into two cues AT the pause.
+TRANSLATE 'translatedText' into ${langConfig.name} (${langConfig.local}). Output valid JSON array with id, startTime, endTime (HH:MM:SS.mmm), originalText, translatedText, source.`;
+
+                const retryContents: typeof contents = [
+                  {
+                    fileData: {
+                      fileUri: validFile.uri,
+                      mimeType: mimeType,
+                    },
+                  },
+                ];
+
+                if (frames && frames.length > 0) {
+                  for (const f of frames) {
+                    retryContents.push({
+                      inlineData: {
+                        data: f.base64Data,
+                        mimeType: f.mimeType || 'image/jpeg',
+                      },
+                    });
+                    retryContents.push({
+                      text: `[Visual Frame at ${f.timeSec.toFixed(2)}s]`,
+                    });
+                  }
+                }
+
+                retryContents.push(retryPrompt);
 
                 const retryRes = await ai.models.generateContent({
                   model: modelName,
-                  contents: [
-                    {
-                      fileData: {
-                        fileUri: validFile.uri,
-                        mimeType: mimeType,
-                      },
-                    },
-                    retryPrompt,
-                  ],
+                  contents: retryContents,
                   config: {
                     maxOutputTokens: 65536,
                     responseMimeType: 'application/json',

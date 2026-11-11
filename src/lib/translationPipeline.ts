@@ -11,7 +11,7 @@ import { SubtitleItem, TranslationProgressEvent } from './types';
  */
 
 export const CHUNK_CONCURRENCY = 3;
-export const CHUNK_MAX_ATTEMPTS = 3;
+export const CHUNK_MAX_ATTEMPTS = 4;
 export const CHUNK_RETRY_BASE_MS = 1500;
 
 export interface ChunkResult {
@@ -62,6 +62,10 @@ async function processChunk(
     deps: PipelineDeps;
     maxAttempts: number;
     retryBaseMs: number;
+    /** Chunk-local extras (e.g. OCR frames). Runs once per chunk, before the
+     *  retry loop: a failure here fails the chunk without fetch-level retries
+     *  (the manual retry re-runs it). No video source degrades to audio-only. */
+    prepareChunk?: (chunk: AudioChunk, formData: FormData) => Promise<void>;
     onSuccess?: () => void;
   }
 ): Promise<ChunkResult> {
@@ -73,6 +77,7 @@ async function processChunk(
   formData.append('chunkIndex', String(chunk.chunkIndex));
   formData.append('chunkStartTime', String(chunk.startTime));
   formData.append('wordTiming', karaokeEnabled ? '1' : '0');
+  await opts.prepareChunk?.(chunk, formData);
 
   let lastErr: unknown = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -89,7 +94,11 @@ async function processChunk(
     } catch (err: unknown) {
       if (isAbortError(err)) throw err;
       lastErr = err;
-      if (attempt < maxAttempts) await delay(retryBaseMs * attempt);
+      // Guaranteed-fail payloads (e.g. token ceiling) fail identically on
+      // every model and key; retrying only burns minutes. Fail the chunk now
+      // and let the retry banner own recovery.
+      if (isNonRetryableChunkError(err)) throw err;
+      if (attempt < maxAttempts) await delay(Math.round(retryBaseMs * Math.pow(1.8, attempt - 1)));
     }
   }
   throw lastErr ?? new Error(`Failed on chunk ${chunk.chunkIndex + 1}`);
@@ -112,12 +121,17 @@ export async function runChunkedTranslation(
     concurrency?: number;
     maxAttempts?: number;
     retryBaseMs?: number;
+    /** Chunk-local extras (e.g. OCR frames extracted from the video window). */
+    prepareChunk?: (chunk: AudioChunk, formData: FormData) => Promise<void>;
+    /** Live re-estimate of remaining time, emitted after each chunk success. */
+    onEta?: (info: { remainingSecs: number; completed: number; total: number }) => void;
   }
 ): Promise<ChunkRunSummary> {
   const concurrency = opts.concurrency ?? CHUNK_CONCURRENCY;
   const maxAttempts = opts.maxAttempts ?? CHUNK_MAX_ATTEMPTS;
   const retryBaseMs = opts.retryBaseMs ?? CHUNK_RETRY_BASE_MS;
 
+  const startedAt = Date.now();
   let completed = 0;
   const failedChunkIndexes: number[] = [];
   const results: ChunkResult[] = [];
@@ -134,9 +148,22 @@ export async function runChunkedTranslation(
             deps: opts.deps,
             maxAttempts,
             retryBaseMs,
+            prepareChunk: opts.prepareChunk,
             onSuccess: () => {
               completed++;
               opts.onProgress(completed, chunks.length);
+              // Wall-clock rate per completed chunk already includes the batch
+              // parallelism, so scaling it by remaining chunks is an honest
+              // re-estimate (retries inflate it, which is the point).
+              if (opts.onEta && completed < chunks.length) {
+                const elapsedSecs = (Date.now() - startedAt) / 1000;
+                const rate = elapsedSecs / completed;
+                opts.onEta({
+                  remainingSecs: Math.round(rate * (chunks.length - completed)),
+                  completed,
+                  total: chunks.length,
+                });
+              }
             },
           });
         } catch (err: unknown) {
@@ -163,6 +190,7 @@ export async function runSingleTranslation(
     fileName: string;
     targetLanguage: string;
     karaokeEnabled: boolean;
+    /** Full-file OCR fallback for videos the browser cannot audio-decode. */
     includeOnScreenText?: boolean;
     onProgress?: (event: Extract<TranslationProgressEvent, { type: 'progress' }>) => void;
     deps: PipelineDeps;

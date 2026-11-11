@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { SubtitleItem } from '@/lib/types';
-import { Play, Trash2, Clock, Scissors, AlertTriangle } from 'lucide-react';
+import { Play, Trash2, Clock, Scissors, Combine, AlertTriangle } from 'lucide-react';
 import { hasLanguageLeakage, getLanguageLeakageReason } from '@/lib/languageCheck';
 
 interface SubtitleItemCardProps {
@@ -12,6 +12,7 @@ interface SubtitleItemCardProps {
   onDelete: (id: string) => void;
   onJumpTo: (time: number) => void;
   onSplit?: (id: string) => void;
+  onMerge?: (id: string) => void;
   targetLanguage?: string;
 }
 
@@ -26,6 +27,7 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
   onDelete,
   onJumpTo,
   onSplit,
+  onMerge,
   targetLanguage = 'th',
 }) {
   const leakageReason = React.useMemo(() => {
@@ -115,6 +117,16 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
               aria-label="Split subtitle into two cues"
             >
               <Scissors className="w-4 h-4" />
+            </button>
+          )}
+          {onMerge && (
+            <button
+              onClick={() => onMerge(item.id)}
+              className="p-2.5 rounded-lg text-zinc-400 sm:text-zinc-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all"
+              title="รวมกับซับถัดไปเป็นท่อนเดียว"
+              aria-label="Merge subtitle with the next cue"
+            >
+              <Combine className="w-4 h-4" />
             </button>
           )}
           <button
