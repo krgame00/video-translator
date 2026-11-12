@@ -6,7 +6,10 @@ import { TranslationProgressEvent } from '@/lib/types';
 // Each request uploads a full media file to Gemini — expensive. Guard quota.
 const translateLimiter = createRateLimiter({ windowMs: 60_000, max: 3 });
 
-export const maxDuration = 600; // Allow up to 10 minutes for full-video multimodal processing
+// 300s is the Hobby-plan Serverless ceiling — a higher value makes the whole
+// Vercel deployment fail to build. Full-video OCR runs longer than this
+// locally; on Vercel, use the chunked path (or upgrade the plan).
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   try {

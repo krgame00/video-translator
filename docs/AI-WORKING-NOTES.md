@@ -9,7 +9,7 @@
   2. **OCR toggle is honest everywhere**: gap repair (`handleFillGaps`) and auto-heal extract frames only when `includeOnScreenText` is on (previously `|| isVideo` made every video scan visuals); the repair button title adapts (audio-only vs audio+OCR). A parallel writer made OCR default ON, so default behavior is unchanged — turning the toggle off now truly saves the frame cost.
   3. **Hardsub font selection**: new `src/lib/fontRegistry.ts` scans `public/fonts` (family derived from filename, `-Regular` preferred, Itim sorted first) with a new `GET /api/fonts`; `buildAss` writes `style.fontName` into both Style lines (was hard-coded Itim); the burn route pins unknown families back to the registry; ExportModal and the VideoPlayer style panel get Font selects; the page injects `@font-face` rules from the registry so the preview renders the chosen family; the choice persists in `subStyle` (new `fontName` field with validation). Today `public/fonts` holds only Itim — dropping more `.ttf` files in makes them selectable (the full directory ships to libass via fontsdir already).
 - **Verification Evidence**: `npm run gate` 25 files passed (subtitleStyle round-trip test extended with fontName); `npx next build` green. The two `scripts/` consumers of the service return shape surfaced via typecheck.
-- **Commit status**: not committed (user owns commit timing).
+- **Commit status**: committed as `86a09a1` and pushed to origin/main (one commit with the decode-cache / abort / per-cue batch).
 
 ### [2026-11-12] Decode Memoization, Gap-Repair Abort, and Per-Cue AI Re-translate
 - **Status**: `VERIFIED WORKING` on tests + build (per-cue button pending UI proof)
@@ -18,7 +18,7 @@
   2. **Gap-repair abort**: `handleFillGaps` now runs with an AbortController stored in `gapAbortRef`, aborted on editor unmount; partial results recovered before an abort are still merged (paid-for work kept) but toasts are skipped. Integrated with the parallel writer's new multi-gap parallel batching (allSettled, concurrency 3).
   3. **Per-cue AI re-translate**: new Wand2 button on each `SubtitleItemCard` calls the existing `/api/translate-srt` endpoint with the focus cue ± 2 neighbors as context (ids are echoed back), then applies ONLY the focus cue's new translation and drops stale karaoke words. No server changes. Note: the endpoint's per-IP rate limit is 5 req/min, so rapid clicking can hit 429 (surfaces as a toast).
 - **Verification Evidence**: `npm run gate` 25 files passed (new `src/lib/audioExtractor.test.ts`: one decode per File, per-File keys, >2h buffers skip cache); `npx next build` compiled all routes. The re-translate button has no component test (repo has no DOM harness; lib-only test convention) — prove it on the real UI.
-- **Commit status**: not committed (user owns commit timing per workflow).
+- **Commit status**: committed as `86a09a1` and pushed to origin/main.
 
 ### [2026-11-11] Chunked OCR, Failed-Chunk Retry, Adaptive ETA, and Editor/Export Upgrades
 - **Status**: `VERIFIED WORKING` on tests + build (real-footage OCR run pending user proof)
