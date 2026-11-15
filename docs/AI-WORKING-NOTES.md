@@ -2,6 +2,127 @@
 
 ## Current Status & Verification Log
 
+### [2026-11-15] HARDSUB EXPORT BITRATE & FILE SIZE OPTIMIZATION (CQ 30 VBR) — VERIFIED WORKING
+- **Status**: `VERIFIED WORKING` — Tested with real 1080x1920 video and Thai hardsub text. Quality gate clean: tsc ✅ (0 errors), eslint ✅ (0 errors), vitest ✅ 79/79 passed (25 files).
+- **Context & Problem**:
+  - After solving the anamorphic squish issue, the exported video file size increased to ~299MB (15-min video) because the canvas was expanded to true 1080x1920 square pixels and NVENC was using fixed CQ 26 without true VBR bitrate release.
+  - User requested: "แล้วทำไมไฟล์มันใหญ่ขึ้นด้วยละ" & "ปรับหน่อยครับ" to reduce output file size.
+- **Empirical Test Results on User Sample (`anamorphic_sample.mp4`)**:
+  - `CQ 26 (baseline)`: 1,756,588 bytes (~299MB per 15 min)
+  - `CQ 28`: 1,385,344 bytes (21% reduction, ~235MB per 15 min)
+  - `CQ 30 (-rc vbr -cq 30 -b:v 0)`: 1,122,718 bytes (36% reduction, ~190MB per 15 min)
+  - Visual frame inspection (`frame_cq30.jpg`): Thai subtitles and video textures remain completely sharp, clean, and artifact-free.
+- **Implementation**:
+  - In `src/app/api/export-hardsub/route.ts`:
+    - Updated NVENC config to: `-c:v h264_nvenc -preset p4 -rc vbr -cq 30 -b:v 0 -profile:v main -level 4.1 -pix_fmt yuv420p -movflags +faststart`.
+    - Updated CPU fallback (`libx264`) to `-crf 28`.
+    - Updated Intel QSV to `-global_quality 28` and AMD AMF to `-qp_i 28 -qp_p 28`.
+- **Verification Evidence**:
+  - `npx tsc --noEmit`: Exit 0.
+  - `npm run lint`: Exit 0.
+  - `npm test`: 25 test files passed, 79/79 unit tests green.
+  - Extracted frame artifact: `frame_cq30.jpg` visually verifies pristine Thai font readability.
+- **Commit status**: not committed (user owns commit timing).
+
+### [2026-11-15] ANAMORPHIC VIDEO (NON-SQUARE PIXELS SAR 9:16) SUBTITLE SQUISH FIX — VERIFIED WORKING
+- **Status**: `VERIFIED WORKING` — Tested with real anamorphic user video (`1080x1080` container with `SAR 9:16`). Quality gate clean: tsc ✅ (0 errors), eslint ✅ (0 errors), vitest ✅ 79/79 passed (25 files).
+- **Root Cause Analysis (Smoking Gun)**:
+  - User's video has anamorphic non-square pixels: `width: 1080, height: 1080, sample_aspect_ratio: 9:16, display_aspect_ratio: 9:16`.
+  - When played, players display it as a 9:16 portrait video by stretching height (or squeezing width).
+  - Even with `PlayResX: 1080, PlayResY: 1920`, if the underlying video container remains 1080×1080 with non-square pixels, libass renders onto the raw 1080×1080 frame buffer where font width is 1:1, and then player SAR playback squeezes the text horizontally to 56% width (บีบ).
+- **Fix**:
+  - In `src/app/api/export-hardsub/route.ts`:
+    1. `probeVideoDimensions()` detects `isAnamorphic` and normalizes display dimensions (1080×1920).
+    2. When `isAnamorphic` is detected, the video filtergraph injects `scale=${job.playResX}:${job.playResY},setsar=1` BEFORE the `ass` filter (`scale=1080:1920,setsar=1,ass='sub.ass'`).
+    3. Normalizes the video to true square pixels (1080×1920, SAR 1:1) so libass burns directly onto the true canvas.
+    4. The output file is a standard 1080×1920 square-pixel MP4 playable on all players with zero distortion.
+- **Verification Evidence**:
+  - Live FFmpeg burn with `scale=1080:1920,setsar=1,ass='...'` on user's exact cue extracted to `frame_user_cue_fixed.jpg`: verified Thai text "งั้น มาช่วยตัวเองลับๆแบบ ไม่ให้ใครจับได้กันดีกว่า" is 100% round, natural, and completely free of any horizontal squish.
+  - `npx tsc --noEmit`: Exit 0.
+  - `npm test`: 25 test files passed, 79/79 unit tests passed.
+- **Commit status**: not committed (user owns commit timing).
+
+### [2026-11-15] HARDWARE ACCELERATION (NVIDIA GPU NVENC) ENABLED — VERIFIED WORKING
+- **Status**: `VERIFIED WORKING` — Tested with NVIDIA GeForce RTX 5050 (Driver 32.0.16.2101) + FFmpeg NVENC (`h264_nvenc`). Quality gate clean: tsc ✅ (0 errors), eslint ✅ (0 errors), vitest ✅ 79/79 passed (25 files).
+- **Hardware Verified**:
+  - GPU: NVIDIA GeForce RTX 5050 detected via `Get-CimInstance Win32_VideoController`.
+  - Encoder: `h264_nvenc` verified functional via live FFmpeg test encode on `vertical.mp4` with ASS subtitle filter (`speed=3.35x` vs ~1x CPU).
+  - Subtitle rendering: Thai glyphs & ASS styles confirmed crisp via extracted frame `frame_nvenc_test.jpg`.
+- **Architecture & Implementation**:
+  1. `src/lib/env.ts`: Added `FFMPEG_VIDEO_ENCODER` config schema (`z.string().optional().default('auto')`) and `env.ffmpegVideoEncoder` accessor.
+  2. `src/lib/env.test.ts`: Added `FFMPEG_VIDEO_ENCODER` to tracked environment keys and added unit tests for defaults and overrides.
+  3. `src/app/api/export-hardsub/route.ts`: Added `resolveVideoEncoder()` with automated hardware probe:
+     - Automatically verifies and prioritizes `h264_nvenc` (NVIDIA GPU), `h264_qsv` (Intel), `h264_amf` (AMD), with graceful fallback to `libx264` (CPU).
+     - Configured NVENC with `-preset p4 -cq 26 -profile:v main -level 4.1 -pix_fmt yuv420p -movflags +faststart`.
+  4. `.env.local`: Configured `FFMPEG_VIDEO_ENCODER=h264_nvenc` explicitly.
+- **Verification Evidence**:
+  - `npx tsc --noEmit`: Exit 0.
+  - `npm run lint`: Exit 0.
+  - `npm test`: 25 test files passed, 79/79 unit tests green.
+  - Test video encode output: `scratch/test-vertical/test_nvenc_out.mp4` successfully generated via `h264_nvenc`.
+- **Commit status**: not committed (user owns commit timing).
+
+### [2026-11-13] HARDSUB PORTRAIT VIDEO TEXT STRETCH FIX — VERIFIED WORKING (gate ✅)
+- **Status**: `VERIFIED WORKING` — tsc ✅ / eslint ✅ (0 errors) / vitest 77 tests ✅ (25 files), exit 0
+- **Root Cause**: Browser `videoWidth`/`videoHeight` on a `<video>` element reports correct portrait dimensions (1080×1920). However, the .ass `PlayResX`/`PlayResY` could mismatch if the client failed to report dimensions (fallback was 1920×1080), causing libass to stretch text horizontally on portrait video.
+- **Fix** (5 files changed):
+  1. `src/lib/types.ts` — Added `subtitles?: SubtitleItem[]` and `style?: SubtitleStyle` to `ExportJob` interface so the route can re-generate .ass after video probe.
+  2. `src/lib/env.ts` — Added `FFPROBE_PATH` env var support (zod schema + accessor).
+  3. `src/lib/appReducer.ts` — Added `SET_VIDEO_DIMENSIONS` action type and reducer case.
+  4. `src/components/VideoPlayer.tsx` — Added `onVideoDimensions` prop; calls callback in `onLoadedMetadata` and via `useEffect` if already loaded.
+  5. `src/app/api/export-hardsub/route.ts` — Added `probeVideoDimensions()` (ffprobe `-show_entries frame=width,height:stream=width,height -read_intervals "%+#1"`); integrated anti-stretch guard in `runFFmpegEncoding()`: if probed dims differ from job PlayRes, auto-aligns and regenerates .ass file before encoding starts.
+  6. `src/app/page.tsx` — Wired `onVideoDimensions` callback; cleaned up 4 unused icon imports (`AlertCircle`, `AlertTriangle`, `RotateCcw`, `FileText`).
+- **Verification Evidence**: `npx tsc --noEmit` exit 0; `eslint` 0 errors; `vitest run` 77/77 tests passed (25 files). Gate clean.
+- **NOT yet manually tested** with a real portrait .mp4 export — user should test in browser at http://localhost:3001.
+- **Commit status**: not committed (user owns commit timing).
+
+### [2026-11-13] DEV SERVER LAUNCH & BROWSER VERIFICATION — VERIFIED WORKING
+- **Status**: `VERIFIED WORKING` — Next.js dev server up on port 3001 (PID 28644/23872), loaded `http://localhost:3001/` with HTTP 200, HMR connected.
+- **Context**: User requested "รันเปิดหน่อยครับ" after seeing Super K manga screen in previous browser tab on port 3000.
+- **Verification Evidence**:
+  - `Get-NetTCPConnection` confirmed port 3001 in Listen state.
+  - `Invoke-WebRequest` returned HTTP 200 OK.
+  - Turbopack compiled `/` and `/api/fonts` cleanly.
+  - Chrome DevTools MCP snapshot verified page title `"Video Subtitle Translator Studio | Gemini AI"` with video stage, timeline, and `⚡ ซ่อมทุกจุดพร้อมกัน (3)` button visible.
+  - Console logged `[HMR] connected` with 0 runtime errors.
+
+### [2026-11-13] MULTIMODAL ZERO-ATTENTION-DROPS & PARALLEL GAP REPAIR — VERIFIED WORKING
+- **Status**: `VERIFIED WORKING` — 24 test files / 73 tests green; dev server running cleanly on port 3001.
+- **What Landed**:
+  1. **Multimodal OCR & Quiet Whisper Capture Rules**: Enhanced system prompt with rules 8 & 9 ("Zero Attention Drops: Capturing on-screen signboards, lower thirds, titles, and low-volume whisper audio").
+  2. **Client-side Video Frame Extraction**: Injected into `prepareChunk` and `handleFillGaps` (`videoFrameExtractor.ts`) using `<canvas>` sampling up to 24 frames per chunk.
+  3. **Parallel Gap Healing**: `autoAuditAndHealGaps` and `handleFillGaps` run parallel workers in batches of 3 (`Promise.allSettled`), healing all detected audio/visual gaps simultaneously without blocking.
+- **Verification Evidence**: Quality gates clean (tsc, eslint, vitest). Parallel repair button renders with badge count in real UI.
+
+### [2026-11-13] FEATURE BUILD REVISED: Immersive Half-Screen Editor (A-style) — VERIFIED ON REAL APP
+- **Status**: `VERIFIED WORKING` — real app screenshots at 1440×900 and 390×844 with the injected demo video + fake cues (uncommitted)
+- **Design evolution**: user picked A+C (page 4 only) → paused once → confirmed the C-card layout build → then asked for the "ครึ่ง ๆ" half-screen style (why isn't it half-half?) — final: **A's immersive half-screen look with C's task-card content, no stepper**. The C-card build from earlier the same day was replaced by this revision.
+- **What Landed (revision)**:
+  1. **VideoPlayer `fill` prop**: immersive mode renders the player absolutely inside the parent (no aspect-video lock, no card border) — the video becomes the stage background; the live Thai caption stays.
+  2. **Workspace = immersive stage** (`page.tsx`): stage fills the left area (video + vignette), **floating glass Timeline capsule** bottom-left, **floating task banners** (reconnect / large-file / error+retry / failed-chunks+retry) above it, **chunk strip** floating under the header with real per-chunk cells, **glass rail right (340px)** holding SubtitleEditor; on mobile the rail stacks below the stage in normal flow (60svh). Export stays in the top header. No stepper, no footer.
+  3. **SubtitleEditor as a glass rail**: container transparent + backdrop-blur via the rail wrapper; header/search strips use translucent whites.
+- **Verification Evidence**: gate 25 files green; `next build` green (2.1min while contending with the dev server); REAL APP screenshots at both viewports show the video filling the stage with the burned-style Thai caption, the floating Timeline capsule with real cue blocks, the glass rail with all editor tools and cue cards, and the reconnect toast ("เชื่อมต่อวิดีโอ demo-clip.mp4 กับซับไตเติลเดิม (6 รายการ) สำเร็จ").
+- **Known tradeoffs**: the editor toolbar wraps vertically inside the 340px rail (usable, slightly tall); video letterboxes on non-16:9 stages (object-contain by design).
+- **Mobile fix (user report: ซ้อนกันดูวิดีโอไม่ได้)**: on small screens the floating UI (banners top-16, Timeline capsule bottom-3, chunk strip) covered the video stage. Mobile now stacks everything in normal flow — video block 42svh alone, then chunk strip card, then task cards, then Timeline card, then editor rail 60svh; the floating overlay + vignette are desktop-only (`xl:`). Desktop floating geometry re-verified by measurement (stage x40 w1020 h795, rail x1060 w340 — no overlap, no stepper text, no horizontal overflow) after a parallel writer added `onVideoDimensions` (kept in my restructure).
+- **Slim control bar (user crop: ซับ + แถบเลื่อนบาง)**: in fill mode the native video controls are hidden and VideoPlayer renders its own slim glass bar at the stage bottom — play/pause, clock (`fmtClock` handles h:mm:ss), thin seek track with drag (pointer capture), mute toggle; the caption overlay lifts +50px above it. Timeline moved from the floating stage capsule into the rail top (Timeline card above SubtitleEditor on every viewport) so nothing covers the video; the old floating capsule was removed. Verified on real app at both viewports — slim bar sits directly under the caption exactly like the user's crop.
+- **Observations for later**: `hasLanguageLeakage` flagged the pure-Thai c1 cue (badge มีภาษาอื่นปน) — possible false positive worth a look; Next 16 locks one dev server per project dir (`taskkill //PID <pid> //F` then restart — Git Bash eats single-slash flags).
+- **Commit status**: not committed (user owns commit timing).
+
+### [2026-11-12] UI Redesign Prototypes (3 directions) — DESIGN DECIDED (see entry below)
+- **Status**: `PROTOTYPE COMPLETE` — throwaway mockups verified on real browser screenshots (1440×900 + 390×844 per direction); NOT production code
+- **Artifact**: `scratch/ui-redesign-video-2026-11-12/` — `index.html` switcher (keys 1/2/3) + `variant-a/b/c.html`, single-file vanilla HTML/CSS, demo scene is inline SVG (no image assets, no deps)
+- **Directions**: A Cinema Immersion (full-bleed stage, floating glass capsule + banners, right rail subtitles → bottom sheet on mobile); B Pro Console (NLE 3-pane: list/stage/inspector + full-width timeline with cue/gap blocks + waveform + status bar exposing chunk grid/ETA/failed workers; mobile tabs); C Guided Flow (5-step stepper, all steps clickable: file pick + resumable projects, settings cards, translation grid with per-chunk cue counts and 429 cells + adaptive ETA, review, export); **D = the user's final pick, refined twice with screenshots — C's step-4 page layout as the main design + A's glass pill toolbar** (`variant-d.html`): stepper + chunk strip + stage card left / task cards + cue panel right (all from C), with the glass pill row (language, OCR, karaoke, translate, Export, undo/redo, shortcuts) from A in the head row. Scope: the editor page as the main workspace design; other pages keep the current UI. NOT yet confirmed for Feature build — the user explicitly paused the build once.
+- **All variants show real app features**: Thai cue cards with OCR/leak badges, split/merge/retranslate/delete ops, gap-repair and failed-chunk-retry banners, 12-cell chunk grid, waveform, hardsub style controls, SRT/VTT/ASS/TXT exports
+- **Verification Evidence**: 6 real screenshots via browser-use IAB; caught-and-fixed layout bugs (banner/caption overlap, rail/topbar collision, mobile horizontal overflow in B, inspector scrollbar); switcher click flake after goto solved with CUA keypress (matches the manga-session lesson)
+- **Next**: user picks a direction (or a blend, e.g. B layout + A floating caption) → Feature playbook builds it for real; scratch files stay uncommitted until then
+
+### [2026-11-12] Vercel Deploy Fix — maxDuration Hobby Ceiling
+- **Status**: `VERIFIED WORKING` — deployment back to `success` (confirmed via GitHub deployment statuses on the fix commit)
+- **Root Cause**: commit `3d76e56` set `maxDuration = 600` in `api/video-translate/route.ts`; the Hobby plan caps Serverless `maxDuration` at 300, and the builder rejects the whole deployment. That commit reached a real deployment for the first time when `d0a989d`/`86a09a1` were pushed.
+- **Fix**: 600 → 300 with a ceiling comment; grep confirms every other route already declares 300.
+- **Runtime caveat**: the full-video OCR fallback can exceed 300s on Vercel (Hobby) — long videos should use the chunked path (default) or a plan upgrade.
+- **Verification Evidence**: gate 25 files passed; pushed `9ab769b`; `gh api deployments/<id>/statuses` returned `success | Deployment has completed`.
+
 ### [2026-11-12] Truncation Flag, OCR-Honest Repairs, and Hardsub Font Selection
 - **Status**: `VERIFIED WORKING` on tests + build (font picker + truncation toast pending UI proof)
 - **What Landed**:

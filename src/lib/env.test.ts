@@ -8,6 +8,7 @@ const KEYS = [
   'MAX_UPLOAD_BYTES',
   'FFMPEG_PATH',
   'FFMPEG_HWACCEL',
+  'FFMPEG_VIDEO_ENCODER',
   'FFMPEG_TIMEOUT_MS',
   'FFMPEG_MAX_JOBS',
   'CRON_SECRET',
@@ -126,4 +127,15 @@ test('validateEnv accepts a valid FFMPEG_MAX_JOBS override', () => {
 test('env.ffmpegMaxJobs falls back to 1 on invalid runtime value', () => {
   process.env.FFMPEG_MAX_JOBS = 'garbage';
   expect(env.ffmpegMaxJobs).toBe(1);
+});
+
+test('validateEnv applies default FFMPEG_VIDEO_ENCODER auto', () => {
+  expect(validateEnv().FFMPEG_VIDEO_ENCODER).toBe('auto');
+  expect(env.ffmpegVideoEncoder).toBe('auto');
+});
+
+test('validateEnv accepts valid FFMPEG_VIDEO_ENCODER override', () => {
+  process.env.FFMPEG_VIDEO_ENCODER = 'h264_nvenc';
+  expect(validateEnv().FFMPEG_VIDEO_ENCODER).toBe('h264_nvenc');
+  expect(env.ffmpegVideoEncoder).toBe('h264_nvenc');
 });

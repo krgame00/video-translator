@@ -9,7 +9,7 @@ import {
   FONT_SIZE_OPTIONS,
 } from '@/lib/subtitleStyle';
 import { ASS_BASE_PLAY_RES_Y } from '@/lib/assBuilder';
-import { Settings, Type } from 'lucide-react';
+import { Settings, Type, Play, Pause, Volume2, VolumeX } from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -21,6 +21,11 @@ interface VideoPlayerProps {
   onStyleChange: (s: SubtitleStyleSettings) => void;
   /** Families from the server font registry (public/fonts). */
   fonts?: string[];
+  /** Fill the parent box edge-to-edge (immersive stage) instead of the
+   *  bounded aspect-video card. Parent must be relative + min-h-0. */
+  fill?: boolean;
+  /** Reports real video dimensions when loaded so hardsub PlayRes matches. */
+  onVideoDimensions?: (width: number, height: number) => void;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -32,10 +37,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   style,
   onStyleChange,
   fonts = ['Itim'],
+  fill = false,
+  onVideoDimensions,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const seekTrackRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState<boolean>(false);
+  // Slim-bar playback state (fill mode hides the native controls, so the bar
+  // owns play/pause/mute/seek). Derived from media events so the Space
+  // shortcut and the bar button always agree.
+  const [playing, setPlaying] = useState<boolean>(false);
+  const [muted, setMuted] = useState<boolean>(false);
+  const [duration, setDuration] = useState<number>(0);
   // Player frame height in CSS px — used to scale the font exactly like
   // libass scales it against the video's real height.
   const [frameH, setFrameH] = useState<number>(360);
@@ -70,6 +84,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setPrevUrl(videoUrl);
     setVideoAspect(null);
   }
+
+  // Ensure dimensions are propagated if the video was already cached/loaded
+  useEffect(() => {
+    if (videoRef.current && videoRef.current.videoWidth && videoRef.current.videoHeight) {
+      onVideoDimensions?.(videoRef.current.videoWidth, videoRef.current.videoHeight);
+    }
+  }, [videoUrl, onVideoDimensions]);
 
   // Keyboard shortcuts (Space = play/pause, Left = -5s, Right = +5s).
   // This component is the SINGLE owner of these keys — the page-level handler
@@ -117,20 +138,48 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Find currently active subtitle (binary search; list is sorted by time)
   const activeSubtitle = findActiveSubtitle(subtitles, currentTime);
 
+  // Slim-bar helpers (fill mode): time format, play toggle, seek by pointer.
+  const fmtClock = (s: number) => {
+    if (!Number.isFinite(s) || s <= 0) return '0:00';
+    const total = Math.floor(s);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = total % 60;
+    const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
+    return h > 0 ? `${h}:${mm}:${String(sec).padStart(2, '0')}` : `${mm}:${String(sec).padStart(2, '0')}`;
+  };
+  const togglePlay = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) v.play();
+    else v.pause();
+  };
+  const seekToClientX = (clientX: number) => {
+    const v = videoRef.current;
+    const track = seekTrackRef.current;
+    if (!v || !track || !Number.isFinite(v.duration) || v.duration <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    v.currentTime = ratio * v.duration;
+  };
+  const progressPct = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
+
   // Font size mirrors the hardsub burn: libass sizes `Fontsize` against
   // PlayResY=288 and scales up to the frame, so the preview uses the same
   // 288 base (NOT the video's real height — that made portrait text tiny).
   const scaledFontSize = Math.max(12, Math.round((style.fontSize * frameH) / ASS_BASE_PLAY_RES_Y));
 
   // Position: margin scaled exactly like the burn (burn: marginV × playResY/288
-  // rendered onto a frame of height playResY → on-screen px = marginV × frameH/288)
+  // rendered onto a frame of height playResY → on-screen px = marginV × frameH/288).
+  // In fill mode the caption clears the slim control bar (+50px).
   const marginPx = Math.round((style.marginV * frameH) / ASS_BASE_PLAY_RES_Y);
+  const captionLift = fill ? 50 : 0;
   const overlayPositionStyle: React.CSSProperties =
     style.position === 'top'
       ? { top: marginPx }
       : style.position === 'middle'
         ? { top: '50%', transform: 'translateY(-50%)' }
-        : { bottom: marginPx };
+        : { bottom: marginPx + captionLift };
 
   // Box (borderStyle 4) vs outline (1) — matching the ASS BackColour/Outline
   const bgStyle: React.CSSProperties =
@@ -156,21 +205,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   return (
     <div
       ref={containerRef}
-      className="relative w-full aspect-video max-h-[70svh] bg-black rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group flex items-center justify-center"
-      style={videoAspect ? { aspectRatio: String(videoAspect) } : undefined}
+      className={
+        fill
+          ? 'absolute inset-0 w-full h-full bg-black overflow-hidden group flex items-center justify-center'
+          : 'relative w-full aspect-video max-h-[70svh] bg-black rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group flex items-center justify-center'
+      }
+      style={fill ? undefined : videoAspect ? { aspectRatio: String(videoAspect) } : undefined}
     >
       {videoUrl ? (
         <>
           <video
             ref={videoRef}
             src={videoUrl}
-            controls
+            controls={!fill}
+            muted={muted}
             playsInline
             onLoadedMetadata={(e) => {
               const w = e.currentTarget.videoWidth;
               const h = e.currentTarget.videoHeight;
-              if (w && h) setVideoAspect(w / h);
+              if (w && h) {
+                setVideoAspect(w / h);
+                onVideoDimensions?.(w, h);
+              }
+              setDuration(e.currentTarget.duration || 0);
             }}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
             onTimeUpdate={(e) => onTimeUpdate(e.currentTarget.currentTime)}
             className="w-full h-full object-contain"
           />
@@ -331,6 +391,49 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   <span style={{ color: textColor }}>{activeSubtitle.translatedText}</span>
                 )}
               </span>
+            </div>
+          )}
+
+          {/* Slim floating control bar (fill mode): play, clock, seek, mute —
+              sits directly under the caption like a cinema subtitle bar */}
+          {fill && (
+            <div className="absolute bottom-2 left-3 right-3 z-20 flex items-center gap-3 rounded-xl bg-[rgba(10,14,20,.72)] border border-white/10 backdrop-blur px-3 py-2">
+              <button
+                onClick={togglePlay}
+                aria-label={playing ? 'Pause' : 'Play'}
+                className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/25 text-white flex items-center justify-center shrink-0 transition-colors"
+              >
+                {playing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+              </button>
+              <span className="font-mono text-[11px] text-zinc-300 shrink-0">
+                {fmtClock(currentTime)} / {fmtClock(duration)}
+              </span>
+              <div
+                ref={seekTrackRef}
+                className="relative flex-1 h-6 cursor-pointer group/seek"
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  seekToClientX(e.clientX);
+                }}
+                onPointerMove={(e) => {
+                  if (e.buttons & 1) seekToClientX(e.clientX);
+                }}
+              >
+                <div className="absolute top-1/2 left-0 right-0 h-1 -translate-y-1/2 rounded-full bg-white/15">
+                  <div className="h-full rounded-full bg-indigo-400" style={{ width: `${progressPct}%` }} />
+                </div>
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white shadow"
+                  style={{ left: `${progressPct}%` }}
+                />
+              </div>
+              <button
+                onClick={() => setMuted((m) => !m)}
+                aria-label={muted ? 'Unmute' : 'Mute'}
+                className="text-zinc-300 hover:text-white shrink-0 transition-colors"
+              >
+                {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </button>
             </div>
           )}
         </>

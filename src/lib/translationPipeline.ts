@@ -127,6 +127,8 @@ export async function runChunkedTranslation(
     prepareChunk?: (chunk: AudioChunk, formData: FormData) => Promise<void>;
     /** Live re-estimate of remaining time, emitted after each chunk success. */
     onEta?: (info: { remainingSecs: number; completed: number; total: number }) => void;
+    /** Per-chunk terminal status, emitted once per chunk (done or exhausted-failed). */
+    onChunkStatus?: (chunkIndex: number, status: 'done' | 'failed') => void;
   }
 ): Promise<ChunkRunSummary> {
   const concurrency = opts.concurrency ?? CHUNK_CONCURRENCY;
@@ -153,6 +155,7 @@ export async function runChunkedTranslation(
             prepareChunk: opts.prepareChunk,
             onSuccess: () => {
               completed++;
+              opts.onChunkStatus?.(chunk.chunkIndex, 'done');
               opts.onProgress(completed, chunks.length);
               // Wall-clock rate per completed chunk already includes the batch
               // parallelism, so scaling it by remaining chunks is an honest
@@ -171,6 +174,7 @@ export async function runChunkedTranslation(
         } catch (err: unknown) {
           if (isAbortError(err)) throw err;
           failedChunkIndexes.push(chunk.chunkIndex);
+          opts.onChunkStatus?.(chunk.chunkIndex, 'failed');
           console.warn(`Chunk ${chunk.chunkIndex + 1} failed after ${maxAttempts} attempts:`, err);
           return null;
         }

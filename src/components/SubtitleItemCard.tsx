@@ -44,8 +44,8 @@ export const SubtitleItemCard: React.FC<SubtitleItemCardProps> = React.memo(func
     <div
       className={`group relative rounded-xl border p-4 transition-all duration-200 ${
         isActive
-          ? 'bg-blue-600/10 border-blue-500/60'
-          : 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900'
+          ? 'bg-indigo-600/10 border-indigo-500/60'
+          : 'bg-white/[.03] border-[#262c4e] hover:border-[#343c6b] hover:bg-white/[.05]'
       }`}
     >
       <div className="flex items-center justify-between gap-2 mb-3">

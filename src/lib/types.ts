@@ -36,6 +36,10 @@ export interface ExportJob {
   karaoke?: boolean;
   /** 6-hex RGB karaoke fill color (defaults to style.primaryColor). */
   highlightColor?: string;
+  /** Subtitles payload kept for dynamic PlayRes re-alignment upon video probe. */
+  subtitles?: SubtitleItem[];
+  /** Subtitle styling settings kept for dynamic PlayRes re-alignment. */
+  style?: SubtitleStyle;
 }
 
 export type TranslationProgressStep =

@@ -6,7 +6,7 @@ import { Timeline } from '@/components/Timeline';
 import { SubtitleEditor } from '@/components/SubtitleEditor';
 import { ExportModal } from '@/components/ExportModal';
 import { LanguageSelect } from '@/components/LanguageSelect';
-import { Upload, Download, Video, AlertCircle, AlertTriangle, Clock, XCircle, RotateCcw, HelpCircle, Film, Sparkles, Undo2, Redo2, FileText, MicVocal } from 'lucide-react';
+import { Upload, Download, Video, Clock, XCircle, HelpCircle, Film, Sparkles, Undo2, Redo2, MicVocal } from 'lucide-react';
 
 import { extractAudioChunks, extractAudioSegment, type AudioChunk } from '@/lib/audioExtractor';
 import { extractVideoFrames } from '@/lib/videoFrameExtractor';
@@ -51,6 +51,10 @@ export default function Home() {
     prepareChunk?: (chunk: AudioChunk, formData: FormData) => Promise<void>;
   } | null>(null);
   const [failedChunkCount, setFailedChunkCount] = useState(0);
+  // Per-chunk status for the strip ('queued' | 'done' | 'failed'), indexed by
+  // chunkIndex. Filled by the pipeline's onChunkStatus; cleared on the
+  // single-clip path (no chunk data to show there).
+  const [chunkStatuses, setChunkStatuses] = useState<string[]>([]);
 
   // Subtitle font registry from the server (public/fonts) — drives the font
   // selects and injects @font-face rules so the preview renders the same
@@ -86,6 +90,7 @@ export default function Home() {
     const url = URL.createObjectURL(file);
     retryStateRef.current = null;
     setFailedChunkCount(0);
+    setChunkStatuses([]);
 
     const tempVid = document.createElement('video');
     tempVid.muted = true;
@@ -454,6 +459,7 @@ export default function Home() {
         return;
       }
       setWaveformPeaks(extractedPeaks);
+      setChunkStatuses(new Array(chunks.length).fill('queued'));
       console.log(`[Audio Chunker] Total chunks created: ${chunks.length}`);
 
       // Chunk-local OCR frames: each chunk carries JPEG frames sampled from its
@@ -496,6 +502,11 @@ export default function Home() {
           onEta: ({ remainingSecs }) => {
             dispatch({ type: 'SET_ESTIMATED_SECS', payload: Math.round(elapsedRef.current + remainingSecs) });
           },
+          onChunkStatus: (i, s) => setChunkStatuses((prev) => {
+            const next = [...prev];
+            if (i < next.length) next[i] = s;
+            return next;
+          }),
         });
 
         if (!controller.signal.aborted) {
@@ -557,6 +568,7 @@ export default function Home() {
           }
         }
       } else {
+        setChunkStatuses([]);
         dispatch({ type: 'UPDATE_PROGRESS', payload: {
           statusMessage: 'กำลังส่งแทร็กเสียงไปยัง Gemini AI เพื่อถอดเสียงและแปลภาษา...'
         } });
@@ -633,6 +645,11 @@ export default function Home() {
     if (!retryState || retryState.failedChunks.length === 0) return;
 
     const controller = new AbortController();
+    setChunkStatuses((prev) => {
+      const next = [...prev];
+      retryState.failedChunks.forEach((c) => { if (c.chunkIndex < next.length) next[c.chunkIndex] = 'queued'; });
+      return next;
+    });
     dispatch({ type: 'START_TRANSLATION', payload: {
       estimatedSecs: Math.max(30, retryState.failedChunks.length * 45),
       statusMessage: `กำลังแปลซ้ำเฉพาะ ${retryState.failedChunks.length} ท่อนที่ล้มเหลว...`,
@@ -654,6 +671,11 @@ export default function Home() {
           onEta: ({ remainingSecs }) => {
             dispatch({ type: 'SET_ESTIMATED_SECS', payload: Math.round(elapsedRef.current + remainingSecs) });
           },
+          onChunkStatus: (i, s) => setChunkStatuses((prev) => {
+            const next = [...prev];
+            if (i < next.length) next[i] = s;
+            return next;
+          }),
         }
       );
 
@@ -943,78 +965,100 @@ export default function Home() {
         )}
 
         {showWorkspace && (
-          <div className="shrink-0 space-y-4">
-            {!selectedFile && subtitles.length > 0 && (
-              <div className="p-3 sm:p-4 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <FileText className="w-4 h-4 text-blue-400 shrink-0" />
-                  <span>
-                    ซับไตเติลของคุณบันทึกไว้อย่างปลอดภัย ({subtitles.length} รายการ) ไม่ต้องเริ่มแปลใหม่! ท่านสามารถเลือกไฟล์วิดีโอเพื่อดูพรีวิวและเล่นต่อได้ทันที
+          <>
+            {/* Immersive stage (A): desktop = video background with floating glass UI;
+                mobile = clean vertical stack so the video is never covered */}
+            <div className="relative flex-1 min-h-0 flex flex-col xl:block">
+              {/* Stage: 42svh block on mobile, fills the left half on desktop */}
+              <div className="relative h-[42svh] min-h-[240px] xl:h-auto xl:min-h-0 xl:absolute xl:inset-0 xl:right-[340px] rounded-2xl overflow-hidden bg-black">
+                <VideoPlayer
+                  fill
+                  videoUrl={videoUrl}
+                  subtitles={subtitles}
+                  currentTime={currentTime}
+                  onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })}
+                  onVideoDimensions={(w, h) => {
+                    if (w && h && (w !== videoWidth || h !== videoHeight)) {
+                      dispatch({ type: 'SET_VIDEO_DIMENSIONS', payload: { width: w, height: h } });
+                    }
+                  }}
+                  seekTime={seekTime}
+                  style={subStyle}
+                  onStyleChange={setSubStyle}
+                  fonts={subtitleFonts}
+                />
+                {/* Vignette keeps the floating glass readable over bright scenes (desktop only —
+                    on mobile the video must stay clean and uncovered) */}
+                <div className="absolute inset-0 pointer-events-none hidden xl:block bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(0,0,0,.45))]" />
+              </div>
+
+              {/* Chunk strip: in-flow card on mobile, floating on desktop */}
+              {chunkStatuses.length > 0 && (
+                <div className="relative mx-3 mt-3 flex items-center gap-3 rounded-xl bg-[rgba(10,14,20,.7)] border border-white/10 backdrop-blur px-3 py-2 xl:mx-0 xl:mt-0 xl:absolute xl:top-2 xl:left-3 xl:right-[352px] z-20">
+                  <span className="font-mono text-[11px] text-zinc-400 shrink-0">แปลแล้ว {chunkStatuses.length} ท่อน:</span>
+                  <div className="flex gap-1 flex-1">
+                    {chunkStatuses.map((s, i) => (
+                      <div
+                        key={i}
+                        title={`ท่อน ${i + 1}: ${s === 'done' ? 'สำเร็จ' : s === 'failed' ? 'ล้มเหลว' : 'รอคิว'}`}
+                        className={`flex-1 h-1.5 rounded-full ${s === 'done' ? 'bg-emerald-500' : s === 'failed' ? 'bg-rose-500' : 'bg-zinc-600'}`}
+                      />
+                    ))}
+                  </div>
+                  <span className="font-mono text-[11px] text-zinc-400 shrink-0">
+                    {chunkStatuses.filter((s) => s === 'done').length} ✓
+                    {chunkStatuses.some((s) => s === 'failed') && ` · ${chunkStatuses.filter((s) => s === 'failed').length} ✗ (กดแปลซ้ำได้)`}
                   </span>
                 </div>
-                <label className="cursor-pointer px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium flex items-center gap-1.5 shrink-0 transition-colors self-start sm:self-auto shadow-sm">
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>เชื่อมต่อไฟล์วิดีโอ</span>
-                  <input type="file" accept="video/*,audio/*" onChange={handleFileSelect} className="hidden" />
-                </label>
-              </div>
-            )}
+              )}
 
-            {isLargeFile && !isLoading && !error && (
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-                <span>Large file detected <strong>({(selectedFile!.size / (1024 * 1024)).toFixed(0)}MB)</strong>. Audio extraction uses optimized parallel chunking to preserve memory.</span>
-              </div>
-            )}
-
-            {error && (
-              <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-                  <span className="truncate">{error}</span>
-                </div>
-                {selectedFile && !isLoading && (
-                  <button onClick={handleTranslate} className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-white font-medium text-xs flex items-center gap-1.5 shrink-0 border border-rose-500/40">
-                    <RotateCcw className="w-3.5 h-3.5" /> Retry
-                  </button>
+              {/* Task banners: stacked cards on mobile, floating glass on desktop */}
+              <div className="relative mx-3 mt-3 flex flex-col gap-2 xl:mx-0 xl:mt-0 xl:absolute xl:z-20 xl:bottom-[152px] xl:left-3 xl:right-[352px]">
+                {!selectedFile && subtitles.length > 0 && (
+                  <div className="rounded-xl px-4 py-3 border border-indigo-400/40 bg-[rgba(20,24,54,.85)] backdrop-blur text-indigo-200 text-xs flex items-center justify-between gap-3">
+                    <span className="truncate">ซับบันทึกไว้ครบ ({subtitles.length} cues) — เชื่อมไฟล์วิดีโอเพื่อดูพรีวิวต่อ</span>
+                    <label className="cursor-pointer px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium flex items-center gap-1.5 shrink-0">
+                      <Upload className="w-3.5 h-3.5" /> เชื่อมต่อ
+                      <input type="file" accept="video/*,audio/*" onChange={handleFileSelect} className="hidden" />
+                    </label>
+                  </div>
+                )}
+                {isLargeFile && !isLoading && !error && (
+                  <div className="rounded-xl px-4 py-2.5 border border-amber-400/30 bg-[rgba(26,18,4,.8)] backdrop-blur text-amber-200 text-xs">
+                    ไฟล์ใหญ่ ({(selectedFile!.size / (1024 * 1024)).toFixed(0)}MB) — สกัดเสียงแบบแบ่งท่อนขนาน
+                  </div>
+                )}
+                {error && (
+                  <div className="rounded-xl px-4 py-3 border border-rose-400/40 bg-[rgba(40,8,14,.85)] backdrop-blur text-rose-200 text-xs flex items-center justify-between gap-3">
+                    <span className="truncate">{error}</span>
+                    {selectedFile && !isLoading && (
+                      <button onClick={handleTranslate} className="px-3 py-1.5 rounded-lg bg-rose-500/30 hover:bg-rose-500/50 text-white font-semibold text-xs shrink-0 border border-rose-400/40">
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                )}
+                {failedChunkCount > 0 && !isLoading && (
+                  <div className="rounded-xl px-4 py-3 border border-amber-400/40 bg-[rgba(26,18,4,.85)] backdrop-blur text-amber-200 text-xs flex items-center justify-between gap-3">
+                    <span className="min-w-0">
+                      <b className="block text-[12.5px]">ท่อนแปลล้มเหลว {failedChunkCount} ท่อน</b>
+                      <span className="opacity-85">ท่อนอื่นใช้งานได้ปกติ</span>
+                    </span>
+                    <button onClick={handleRetryFailedChunks} className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 font-bold text-xs shrink-0">
+                      แปลซ้ำเฉพาะท่อน
+                    </button>
+                  </div>
                 )}
               </div>
-            )}
 
-            {failedChunkCount > 0 && !isLoading && (
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-                  <span className="truncate">
-                    แปลสำเร็จบางส่วน ({failedChunkCount} ท่อนล้มเหลว) ซับที่ได้ใช้งานได้ปกติ
-                  </span>
+              {/* Glass rail: Timeline on top, SubtitleEditor below (every viewport —
+                  the Timeline never covers the video) */}
+              <aside className="relative mt-3 h-[60svh] xl:mt-0 xl:h-auto xl:absolute xl:top-0 xl:right-0 xl:bottom-0 xl:w-[340px] z-20 rounded-2xl overflow-hidden border border-white/10 bg-[rgba(8,11,17,.92)] backdrop-blur-xl shadow-2xl flex flex-col">
+                <div className="shrink-0 mx-2 mt-2 rounded-xl bg-[rgba(10,14,20,.6)] border border-white/10 p-2">
+                  <Timeline selectedFile={selectedFile} currentTime={currentTime} duration={videoDuration} subtitles={subtitles} onSeek={handleJumpToTime} activeId={activeSubtitle?.id ?? null} onUpdateSub={handleTimelineUpdateSub} onDragStart={pushHistory} sharedPeaks={waveformPeaks} onDecodeError={() => showToast('ไม่สามารถถอดรหัสเสียงสำหรับ waveform ได้ (ไฟล์อาจใหญ่เกินหรือ codec ไม่รองรับ) — Timeline ยังใช้งานได้ปกติ', 'info')} />
                 </div>
-                <button
-                  onClick={handleRetryFailedChunks}
-                  className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-white font-medium text-xs flex items-center gap-1.5 shrink-0 border border-amber-500/40"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" /> แปลเฉพาะ {failedChunkCount} ท่อนที่ค้าง
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Studio Workspace: single column with bounded heights on phones
-            (the virtualized list needs an explicit height), 12-col grid
-            from lg: up. svh tracks the mobile browser chrome. */}
-        {showWorkspace && (
-          <div className="flex-1 flex flex-col gap-4 min-h-0">
-            <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 min-h-0">
-              <div className="lg:col-span-7 xl:col-span-8 lg:h-[520px] min-h-0 min-w-0">
-                <VideoPlayer videoUrl={videoUrl} subtitles={subtitles} currentTime={currentTime} onTimeUpdate={(t) => dispatch({ type: 'SET_CURRENT_TIME', payload: t })} seekTime={seekTime} style={subStyle} onStyleChange={setSubStyle} fonts={subtitleFonts} />
-              </div>
-              {/* Must carry a matching col-span: the grid is 12 columns from
-                  lg: up, and a child without one defaults to span 1 — an
-                  eighth-width sidebar that squeezes the toolbar and clips the
-                  header copy. Mirrors the video column above (7 / 8 of 12). */}
-              <div className="lg:col-span-5 xl:col-span-4 h-[72svh] min-h-[420px] lg:h-[520px] lg:min-h-0">
-                <SubtitleEditor
+                <div className="flex-1 min-h-0">
+                  <SubtitleEditor
                   subtitles={subtitles}
                   currentTime={currentTime}
                   onSubtitlesChange={handleSubtitlesLiveChange}
@@ -1026,12 +1070,10 @@ export default function Home() {
                   videoUrl={videoUrl}
                   includeOnScreenText={includeOnScreenText}
                 />
-              </div>
+                </div>
+              </aside>
             </div>
-            {selectedFile && (
-              <Timeline selectedFile={selectedFile} currentTime={currentTime} duration={videoDuration} subtitles={subtitles} onSeek={handleJumpToTime} activeId={activeSubtitle?.id ?? null} onUpdateSub={handleTimelineUpdateSub} onDragStart={pushHistory} sharedPeaks={waveformPeaks} onDecodeError={() => showToast('ไม่สามารถถอดรหัสเสียงสำหรับ waveform ได้ (ไฟล์อาจใหญ่เกินหรือ codec ไม่รองรับ) — Timeline ยังใช้งานได้ปกติ', 'info')} />
-            )}
-          </div>
+          </>
         )}
       </div>
 

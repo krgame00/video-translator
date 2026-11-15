@@ -205,6 +205,39 @@ test('runChunkedTranslation fails fast on non-retryable errors (token ceiling)',
   expect(attempts).toHaveLength(1); // no futile retries on a guaranteed-fail payload
 });
 
+test('runChunkedTranslation emits per-chunk terminal status', async () => {
+  const statuses: [number, string][] = [];
+  // Chunk 0: fails once then succeeds. Chunk 1: fails every attempt.
+  let failures = 0;
+  const fetchImpl = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+    const body = init?.body as FormData;
+    const idx = Number((body.get('chunkIndex') as string) || 0);
+    if (idx === 1 || (idx === 0 && failures === 0)) {
+      if (idx === 0) failures++;
+      return { json: async () => ({ success: false, error: 'boom' }) } as unknown as Response;
+    }
+    return okResponse();
+  }) as unknown as typeof fetch;
+  const ctrl = new AbortController();
+
+  const { failedChunkIndexes } = await runChunkedTranslation([makeChunk(0), makeChunk(1)], {
+    targetLanguage: 'th',
+    karaokeEnabled: false,
+    deps: { fetchImpl, signal: ctrl.signal },
+    onProgress: () => {},
+    retryBaseMs: 1,
+    onChunkStatus: (i, s) => statuses.push([i, s]),
+  });
+
+  expect(failedChunkIndexes).toEqual([1]);
+  // Terminal status only: the intermediate attempt failure on chunk 0 must
+  // NOT emit 'failed' — the cell stays 'queued' until the chunk settles.
+  expect(statuses).toEqual([
+    [0, 'done'],
+    [1, 'failed'],
+  ]);
+});
+
 test('runSingleTranslation returns subtitles and throws on API failure', async () => {
   const ctrl = new AbortController();
   const ok = (await runSingleTranslation({

@@ -108,11 +108,247 @@ function deleteJob(jobId: string): void {
   }
 }
 
+interface ProbedVideoDimensions {
+  width: number;
+  height: number;
+  isAnamorphic?: boolean;
+}
+
+/**
+ * Uses ffprobe to detect real DISPLAY dimensions of the uploaded video,
+ * accounting for rotation metadata and non-square pixels (SAR != 1:1).
+ *
+ * Videos shot on phones or downloaded from platforms are often stored as
+ * anamorphic (e.g. 1080×1080 with SAR 9:16) or landscape with rotate=90.
+ * FFprobe returns raw stream dims — we must normalize SAR and rotation so
+ * PlayResX/PlayResY match the actual visual frame geometry.
+ */
+async function probeVideoDimensions(videoPath: string): Promise<ProbedVideoDimensions | null> {
+  try {
+    const ffprobeBin = env.ffprobePath || 'ffprobe';
+    return await new Promise((resolve) => {
+      const proc = spawn(ffprobeBin, [
+        '-v', 'error',
+        '-select_streams', 'V:0',
+        // stream=width,height,sample_aspect_ratio,display_aspect_ratio → raw dims & pixel aspect ratio
+        // stream_tags=rotate   → "rotate=90" iPhone/Android metadata
+        // stream_side_data=rotation → modern Display Matrix rotation field
+        '-show_entries', 'stream=width,height,sample_aspect_ratio,display_aspect_ratio:stream_tags=rotate:stream_side_data=rotation',
+        '-of', 'json',
+        videoPath,
+      ]);
+      let out = '';
+      proc.stdout?.on('data', (d: Buffer | string) => { out += d.toString(); });
+      proc.on('close', (code) => {
+        if (code !== 0) return resolve(null);
+        try {
+          const parsed = JSON.parse(out);
+          const stream = parsed.streams?.[0];
+          if (!stream) return resolve(null);
+
+          let width: number = stream.width;
+          let height: number = stream.height;
+
+          // --- Non-square pixel (Anamorphic) handling ---
+          // Phones or downloaders may store 9:16 vertical video as 1080×1080 with SAR 9:16.
+          // Libass draws on raw pixels; if PlayRes does not match DAR, the player squeezes
+          // or stretches subtitles during display. Normalize to display aspect ratio.
+          const sar = stream?.sample_aspect_ratio;
+          let isAnamorphic = false;
+          if (sar && typeof sar === 'string' && sar !== '1:1' && sar !== '0:1') {
+            const [num, den] = sar.split(':').map(Number);
+            if (num > 0 && den > 0 && num !== den) {
+              isAnamorphic = true;
+              if (num < den) {
+                height = Math.round(height * (den / num));
+              } else {
+                width = Math.round(width * (num / den));
+              }
+            }
+          }
+
+          // --- Rotation detection ---
+          // 1. Legacy tag: stream.tags.rotate = "90", "180", "270", "-90" etc.
+          const rotateTag = stream?.tags?.rotate;
+          // 2. Modern side_data: Display Matrix with a "rotation" field (degrees, may be negative)
+          type SideData = { side_data_type?: string; rotation?: number };
+          const sideDataList: SideData[] = stream?.side_data_list ?? [];
+          const displayMatrix = sideDataList.find(
+            (sd) => sd.side_data_type === 'Display Matrix'
+          );
+
+          let rotation = 0;
+          if (rotateTag !== undefined && rotateTag !== null) {
+            rotation = Math.abs(parseInt(String(rotateTag), 10)) % 360;
+          } else if (displayMatrix?.rotation !== undefined) {
+            rotation = Math.abs(Math.round(displayMatrix.rotation)) % 360;
+          }
+
+          // Swap width ↔ height for 90° or 270° so PlayRes matches display orientation.
+          if (rotation === 90 || rotation === 270) {
+            [width, height] = [height, width];
+          }
+
+          console.log(`[FFmpeg Hardsub] ffprobe: raw=${stream.width}×${stream.height} sar=${sar || '1:1'} rotate=${rotation}° → display=${width}×${height} (anamorphic=${isAnamorphic})`);
+
+          if (typeof width === 'number' && width > 0 && typeof height === 'number' && height > 0) {
+            resolve({ width: Math.round(width), height: Math.round(height), isAnamorphic });
+          } else {
+            resolve(null);
+          }
+        } catch {
+          resolve(null);
+        }
+      });
+      proc.on('error', () => resolve(null));
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Probes whether a given video encoder can successfully encode a test frame.
+ */
+async function probeEncoder(ffmpegBin: string, encoder: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(ffmpegBin, [
+      '-f', 'lavfi',
+      '-i', 'color=c=black:s=64x64:d=0.04',
+      '-c:v', encoder,
+      '-f', 'null',
+      '-',
+    ]);
+    proc.on('close', (code) => resolve(code === 0));
+    proc.on('error', () => resolve(false));
+  });
+}
+
+let cachedVideoEncoder: string | null = null;
+
+interface VideoEncoderConfig {
+  encoder: string;
+  args: string[];
+}
+
+/**
+ * Resolves the optimal video encoder based on environment preference and hardware capability.
+ * Defaults to auto-detecting hardware acceleration (NVIDIA NVENC, Intel QSV, AMD AMF)
+ * with graceful fallback to CPU (libx264).
+ */
+async function resolveVideoEncoder(ffmpegBin: string): Promise<VideoEncoderConfig> {
+  const configured = env.ffmpegVideoEncoder;
+
+  let chosen = configured;
+  if (!chosen || chosen === 'auto') {
+    if (cachedVideoEncoder) {
+      chosen = cachedVideoEncoder;
+    } else {
+      if (await probeEncoder(ffmpegBin, 'h264_nvenc')) {
+        console.log('[FFmpeg Hardsub] NVIDIA GPU encoder (h264_nvenc) verified and active');
+        chosen = 'h264_nvenc';
+      } else if (await probeEncoder(ffmpegBin, 'h264_qsv')) {
+        console.log('[FFmpeg Hardsub] Intel QSV GPU encoder (h264_qsv) verified and active');
+        chosen = 'h264_qsv';
+      } else if (await probeEncoder(ffmpegBin, 'h264_amf')) {
+        console.log('[FFmpeg Hardsub] AMD AMF GPU encoder (h264_amf) verified and active');
+        chosen = 'h264_amf';
+      } else {
+        console.log('[FFmpeg Hardsub] No GPU encoder available; using CPU (libx264)');
+        chosen = 'libx264';
+      }
+      cachedVideoEncoder = chosen;
+    }
+  }
+
+  if (chosen === 'h264_nvenc') {
+    return {
+      encoder: 'h264_nvenc',
+      args: [
+        '-c:v', 'h264_nvenc',
+        '-preset', 'p4',
+        '-rc', 'vbr',
+        '-cq', '30',
+        '-b:v', '0',
+        '-profile:v', 'main',
+        '-level', '4.1',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+      ],
+    };
+  }
+
+  if (chosen === 'h264_qsv') {
+    return {
+      encoder: 'h264_qsv',
+      args: [
+        '-c:v', 'h264_qsv',
+        '-preset', 'faster',
+        '-global_quality', '28',
+        '-profile:v', 'main',
+        '-level', '4.1',
+        '-pix_fmt', 'nv12',
+        '-movflags', '+faststart',
+      ],
+    };
+  }
+
+  if (chosen === 'h264_amf') {
+    return {
+      encoder: 'h264_amf',
+      args: [
+        '-c:v', 'h264_amf',
+        '-usage', 'transcoding',
+        '-quality', 'speed',
+        '-rc', 'cqp',
+        '-qp_i', '28',
+        '-qp_p', '28',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+      ],
+    };
+  }
+
+  return {
+    encoder: 'libx264',
+    args: [
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '28',
+      '-profile:v', 'main',
+      '-level', '4.1',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      '-threads', '0',
+    ],
+  };
+}
+
 async function runFFmpegEncoding(jobId: string) {
   let child: ChildProcess | null = null;
   try {
     const job = loadJob(jobId);
     if (!job || job.status === 'cancelled') return;
+
+    // Probe actual video file on disk to guarantee PlayResX/PlayResY match
+    // the video frame 100% (prevents font stretching on portrait/vertical videos).
+    const probed = await probeVideoDimensions(job.inPath);
+    if (probed && (probed.width !== job.playResX || probed.height !== job.playResY)) {
+      console.log(`[FFmpeg Hardsub ${jobId}] Auto-aligning PlayRes from ${job.playResX}x${job.playResY} to probed ${probed.width}x${probed.height} (anti-stretch guard)`);
+      job.playResX = probed.width;
+      job.playResY = probed.height;
+      if (job.subtitles && job.style) {
+        const updatedAss = buildAss(job.subtitles, {
+          playResX: probed.width,
+          playResY: probed.height,
+          style: job.style,
+          karaoke: job.karaoke,
+          highlightColor: job.highlightColor,
+        });
+        fs.writeFileSync(job.subPath, updatedAss, 'utf8');
+      }
+      saveJob(job);
+    }
 
     job.status = 'encoding';
     job.progress = Math.max(job.progress, 5);
@@ -142,25 +378,23 @@ async function runFFmpegEncoding(jobId: string) {
 
     // All styling lives inside the .ass file (PlayRes = real video dims),
     // so no force_style overrides here — that would fight the embedded Style.
+    const encoderConfig = await resolveVideoEncoder(ffmpegBin);
+    console.log(`[FFmpeg Hardsub ${jobId}] Encoder selected: ${encoderConfig.encoder}`);
+
+    let videoFilter = `ass='${subFileName}'${fontsDirArg}`;
+    if (probed?.isAnamorphic && job.playResX && job.playResY) {
+      console.log(`[FFmpeg Hardsub ${jobId}] Anamorphic SAR detected — scaling video to square pixels ${job.playResX}x${job.playResY} (setsar=1) before burning subtitles`);
+      videoFilter = `scale=${job.playResX}:${job.playResY},setsar=1,ass='${subFileName}'${fontsDirArg}`;
+    }
+
     const ffmpegArgs: string[] = [];
     if (env.ffmpegHwaccel) ffmpegArgs.push('-hwaccel', env.ffmpegHwaccel);
     ffmpegArgs.push('-progress', 'pipe:1', '-nostats');
     ffmpegArgs.push(
       '-y',
       '-i', inFileName,
-      '-vf', `ass='${subFileName}'${fontsDirArg}`,
-      '-c:v', 'libx264',
-      // veryfast + crf 26: ultrafast's default rate control produced ~14Mbps
-      // files (250MB for a 3-min portrait clip) that stall weak players;
-      // veryfast compresses ~4x smaller at similar visual quality for only
-      // ~2.4x encode time (still realtime-plus on a desktop CPU).
-      '-preset', 'veryfast',
-      '-crf', '26',
-      '-profile:v', 'main',
-      '-level', '4.1',
-      '-pix_fmt', 'yuv420p',
-      '-movflags', '+faststart',
-      '-threads', '0',
+      '-vf', videoFilter,
+      ...encoderConfig.args,
       '-c:a', 'copy',
       outFileName
     );
@@ -335,6 +569,8 @@ export async function POST(req: NextRequest) {
         playResY,
         karaoke: burn.karaoke,
         highlightColor: burn.highlightColor,
+        subtitles,
+        style,
       };
       saveJob(job);
 

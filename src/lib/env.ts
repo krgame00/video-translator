@@ -45,7 +45,12 @@ const envSchema = z.object({
       .default(DEFAULT_MAX_UPLOAD_BYTES),
   ),
   FFMPEG_PATH: z.preprocess(emptyToUndefined, z.string().trim().min(1).max(512).optional()),
+  FFPROBE_PATH: z.preprocess(emptyToUndefined, z.string().trim().min(1).max(512).optional()),
   FFMPEG_HWACCEL: z.preprocess(emptyToUndefined, z.string().trim().min(1).max(32).optional()),
+  FFMPEG_VIDEO_ENCODER: z.preprocess(
+    emptyToUndefined,
+    z.string().trim().min(1).max(64).optional().default('auto'),
+  ),
   FFMPEG_TIMEOUT_MS: z.preprocess(
     emptyToUndefined,
     z.coerce
@@ -105,8 +110,14 @@ export const env = {
   get ffmpegPath(): string | undefined {
     return process.env.FFMPEG_PATH;
   },
+  get ffprobePath(): string | undefined {
+    return process.env.FFPROBE_PATH;
+  },
   get ffmpegHwaccel(): string | undefined {
     return process.env.FFMPEG_HWACCEL;
+  },
+  get ffmpegVideoEncoder(): string {
+    return process.env.FFMPEG_VIDEO_ENCODER?.trim() || 'auto';
   },
   /** Required by /api/cron/clean-temp when set; unset keeps the endpoint open. */
   get cronSecret(): string | undefined {

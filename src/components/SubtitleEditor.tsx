@@ -488,9 +488,9 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
   }, [onSubtitlesChange]);
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950/80 border border-zinc-800/80 rounded-2xl overflow-hidden backdrop-blur-xl">
+    <div className="flex flex-col h-full bg-transparent overflow-hidden">
       {/* Header Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-3 sm:px-5 sm:py-3.5 border-b border-zinc-800/80 bg-zinc-900/40 gap-2.5 sm:gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-3 sm:px-5 sm:py-3.5 border-b border-white/10 bg-white/[.03] gap-2.5 sm:gap-3">
         <div className="flex items-center justify-between sm:block">
           <h2 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <span>Subtitles List</span>
@@ -735,7 +735,7 @@ export const SubtitleEditor: React.FC<SubtitleEditorProps> = ({
 
       {/* Live Search & Find/Replace Panel */}
       {subtitles.length > 0 && (
-        <div className="bg-zinc-900/90 border-b border-zinc-800 px-5 py-3 space-y-2.5">
+        <div className="bg-white/[.03] border-b border-white/10 px-5 py-3 space-y-2.5">
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
               <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-2.5" />

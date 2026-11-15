@@ -60,6 +60,7 @@ export type AppAction =
   | { type: 'REDO' }
   | { type: 'PUSH_HISTORY' }
   | { type: 'SET_VIDEO_DURATION'; payload: number }
+  | { type: 'SET_VIDEO_DIMENSIONS'; payload: { width: number; height: number } }
   | { type: 'SET_ESTIMATED_SECS'; payload: number };
 
 // ==================== Initial State ====================
@@ -114,6 +115,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         error: null,
         elapsedSecs: 0,
         statusMessage: 'AI Processing Video Speech...',
+      };
+
+    case 'SET_VIDEO_DIMENSIONS':
+      if (state.videoWidth === action.payload.width && state.videoHeight === action.payload.height) {
+        return state;
+      }
+      return {
+        ...state,
+        videoWidth: action.payload.width,
+        videoHeight: action.payload.height,
       };
 
     case 'SET_SUBTITLES':
